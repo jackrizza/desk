@@ -1,0 +1,17 @@
+target/
+cache_data/
+db.sql
+
+frontend/node_modules/
+frontend/.react-router/
+frontend/build/
+frontend/.vite/
+
+.DS_Store
+Thumbs.db
+
+.env
+.env.*
+!.env.example
+
+*/*/.gitignore

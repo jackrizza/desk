@@ -1,0 +1,12 @@
+[package]
+name = "test_bench"
+version = "0.1.0"
+edition = "2024"
+
+[dependencies]
+tokio = { version = "1", features = ["full"] }
+models = { path = "../models" }
+stock_data = { path = "../stock_data" }
+cache = { path = "../cache" }
+log = "0.4.29"
+env_logger = "0.11.10"
