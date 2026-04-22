@@ -5,5 +5,5 @@ edition = "2024"
 
 [dependencies]
 models = { path = "../models" }
-sqlx = { version = "0.8", features = ["sqlite", "runtime-tokio-rustls"] }
+sqlx = { version = "0.8", features = ["postgres", "runtime-tokio-rustls"] }
 tokio = { version = "1", features = ["rt-multi-thread", "macros"] }

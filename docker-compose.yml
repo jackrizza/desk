@@ -1,0 +1,63 @@
+services:
+  postgres:
+    image: postgres:17-alpine
+    container_name: desk-postgres
+    restart: unless-stopped
+    environment:
+      POSTGRES_DB: ${POSTGRES_DB:-desk}
+      POSTGRES_USER: ${POSTGRES_USER:-desk}
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:-desk}
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U ${POSTGRES_USER:-desk} -d ${POSTGRES_DB:-desk}"]
+      interval: 10s
+      timeout: 5s
+      retries: 10
+      start_period: 10s
+    volumes:
+      - postgres_data:/var/lib/postgresql/data
+    ports:
+      - "${POSTGRES_PORT:-5432}:5432"
+
+  openapi:
+    build:
+      context: .
+      dockerfile: apps/openapi/Dockerfile
+    container_name: desk-openapi
+    restart: unless-stopped
+    depends_on:
+      postgres:
+        condition: service_healthy
+    environment:
+      DATABASE_URL: postgres://${POSTGRES_USER:-desk}:${POSTGRES_PASSWORD:-desk}@postgres:5432/${POSTGRES_DB:-desk}
+      API_BIND_ADDRESS: 0.0.0.0:3000
+      API_PUBLIC_BASE_URL: ${API_PUBLIC_BASE_URL:-http://localhost:3000/api}
+      CACHE_DIR: /app/cache_data
+      RUST_LOG: ${RUST_LOG:-info}
+    healthcheck:
+      test: ["CMD-SHELL", "curl --fail --silent http://127.0.0.1:3000/api/health > /dev/null"]
+      interval: 15s
+      timeout: 5s
+      retries: 10
+      start_period: 15s
+    volumes:
+      - openapi_cache:/app/cache_data
+    ports:
+      - "${OPENAPI_PORT:-3000}:3000"
+
+  frontend:
+    build:
+      context: ./frontend
+      dockerfile: Dockerfile
+      args:
+        VITE_API_BASE_URL: ${FRONTEND_VITE_API_BASE_URL:-http://localhost:3000/api}
+    container_name: desk-frontend
+    restart: unless-stopped
+    depends_on:
+      openapi:
+        condition: service_healthy
+    ports:
+      - "${FRONTEND_PORT:-5173}:5173"
+
+volumes:
+  postgres_data:
+  openapi_cache:

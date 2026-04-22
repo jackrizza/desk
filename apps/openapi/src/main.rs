@@ -10,7 +10,7 @@ use poem_openapi::{
     param::Query,
     payload::{Json, PlainText},
 };
-use std::sync::Arc;
+use std::{env, sync::Arc};
 
 use cache::Cache;
 use database::Database;
@@ -23,10 +23,10 @@ mod helpers;
 
 use helpers::{
     ApiTags, CreatePortfolioResponse, CreatePositionResponse, CreateProjectResponse,
-    DeletePortfolioResponse, DeletePositionResponse, DeleteProjectResponse, ErrorBody,
-    GetPortfolioResponse, GetPositionResponse, GetProjectResponse, ListPortfoliosResponse,
-    ListPositionsResponse, ListProjectsResponse, UpdatePortfolioResponse, UpdatePositionResponse,
-    UpdateProjectResponse, internal_error,
+    DeletePortfolioResponse, DeletePositionResponse, DeleteProjectResponse, GetPortfolioResponse,
+    GetPositionResponse, GetProjectResponse, ListPortfoliosResponse, ListPositionsResponse,
+    ListProjectsResponse, UpdatePortfolioResponse, UpdatePositionResponse, UpdateProjectResponse,
+    internal_error,
 };
 
 struct Api {
@@ -46,6 +46,11 @@ impl Api {
             Some(name) => PlainText(format!("hello, {}!", name)),
             None => PlainText("hello!".to_string()),
         }
+    }
+
+    #[oai(path = "/health", method = "get")]
+    async fn health(&self) -> PlainText<&'static str> {
+        PlainText("ok")
     }
 
     #[oai(path = "/stock_data", method = "get")]
@@ -360,20 +365,30 @@ async fn main() -> Result<(), std::io::Error> {
         .filter_level(log::LevelFilter::Info)
         .init();
 
+    let api_bind_address =
+        env::var("API_BIND_ADDRESS").unwrap_or_else(|_| "0.0.0.0:3000".to_string());
+    let api_public_base_url =
+        env::var("API_PUBLIC_BASE_URL").unwrap_or_else(|_| "http://localhost:3000/api".to_string());
+    let cache_dir = env::var("CACHE_DIR").unwrap_or_else(|_| "cache_data".to_string());
+    let database_url = env::var("DATABASE_URL")
+        .unwrap_or_else(|_| "postgres://desk:desk@localhost:5432/desk".to_string());
+
     let api_service = OpenApiService::new(
         Api {
-            cache: Arc::new(Cache::new("cache_data".to_string())),
-            database: Arc::new(Database::connect("db.sql").await.unwrap()),
+            cache: Arc::new(Cache::new(cache_dir)),
+            database: Arc::new(Database::connect(&database_url).await.map_err(|err| {
+                std::io::Error::other(format!("failed to connect to database: {err}"))
+            })?),
         },
         "Desk API",
         "1.0",
     )
-    .server("http://localhost:3000/api");
+    .server(&api_public_base_url);
     let ui = api_service.swagger_ui();
     let app = Route::new().nest("/api", api_service).nest("/", ui);
 
-    info!("Starting server on http://localhost:3000");
-    poem::Server::new(TcpListener::bind("0.0.0.0:3000"))
+    info!("Starting server on http://{api_bind_address}");
+    poem::Server::new(TcpListener::bind(api_bind_address))
         .run(app)
         .await
 }

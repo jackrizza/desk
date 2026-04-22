@@ -1,11 +1,8 @@
-use std::sync::Arc;
-
-use database::Database;
 use models::{
     portfolio::{Portfolio, Position},
     projects::Project,
 };
-use poem_openapi::{ApiResponse, Object, OpenApi, Tags, param::Path, payload::Json};
+use poem_openapi::{ApiResponse, Object, Tags, payload::Json};
 
 #[derive(Tags)]
 pub enum ApiTags {

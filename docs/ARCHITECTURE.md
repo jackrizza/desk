@@ -11,7 +11,7 @@ Frontend (React Router + Vite)
     v
 OpenAPI server (Poem)
     |
-    +-- Database crate (SQLite)
+    +-- Database crate (PostgreSQL)
     +-- Cache crate
     +-- Stock data crate
     +-- Shared models crate
@@ -30,7 +30,7 @@ Shared data types used across the backend, including:
 
 ### `crates/database`
 
-Owns SQLite persistence for:
+Owns PostgreSQL persistence for:
 
 - projects
 - project symbols
@@ -88,7 +88,6 @@ The chat layer:
 
 Current persistence is split like this:
 
-- SQLite: projects, portfolios, positions, project strategy
+- PostgreSQL: projects, portfolios, positions, project strategy
 - browser local storage: chat history, theme state, chat rail state, OpenAI API key
 - local cache directory: market data cache
-

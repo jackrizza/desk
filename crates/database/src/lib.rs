@@ -2,21 +2,17 @@ use models::{
     portfolio::{Portfolio, Position},
     projects::Project,
 };
-use sqlx::{Row, Sqlite, SqlitePool, Transaction, sqlite::SqlitePoolOptions};
+use sqlx::{PgPool, Postgres, Row, Transaction, postgres::PgPoolOptions};
 
 pub struct Database {
-    pool: SqlitePool,
+    pool: PgPool,
 }
 
 impl Database {
     pub async fn connect(database_url: &str) -> Result<Self, sqlx::Error> {
-        let pool = SqlitePoolOptions::new()
+        let pool = PgPoolOptions::new()
             .max_connections(10)
             .connect(database_url)
-            .await?;
-
-        sqlx::query("PRAGMA foreign_keys = ON;")
-            .execute(&pool)
             .await?;
 
         let db = Self { pool };
@@ -24,7 +20,7 @@ impl Database {
         Ok(db)
     }
 
-    pub fn pool(&self) -> &SqlitePool {
+    pub fn pool(&self) -> &PgPool {
         &self.pool
     }
 
@@ -40,7 +36,7 @@ impl Database {
                 updated_at TEXT NOT NULL,
                 interval TEXT NOT NULL,
                 range TEXT NOT NULL,
-                prepost INTEGER NOT NULL CHECK (prepost IN (0, 1))
+                prepost BOOLEAN NOT NULL DEFAULT FALSE
             );
             "#,
         )
@@ -50,21 +46,21 @@ impl Database {
         sqlx::query(
             r#"
             ALTER TABLE projects
-            ADD COLUMN strategy TEXT NOT NULL DEFAULT ''
+            ADD COLUMN IF NOT EXISTS strategy TEXT NOT NULL DEFAULT ''
             "#,
         )
         .execute(&self.pool)
-        .await
-        .ok();
+        .await?;
 
         sqlx::query(
             r#"
             CREATE TABLE IF NOT EXISTS project_symbols (
                 project_id TEXT NOT NULL,
                 symbol TEXT NOT NULL,
-                ordinal INTEGER NOT NULL,
+                ordinal BIGINT NOT NULL,
                 PRIMARY KEY (project_id, ordinal),
-                FOREIGN KEY (project_id) REFERENCES projects(id) ON DELETE CASCADE
+                CONSTRAINT fk_project_symbols_project
+                    FOREIGN KEY (project_id) REFERENCES projects(id) ON DELETE CASCADE
             );
             "#,
         )
@@ -88,17 +84,19 @@ impl Database {
         sqlx::query(
             r#"
             CREATE TABLE IF NOT EXISTS positions (
-                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                id BIGSERIAL PRIMARY KEY,
                 portfolio_id TEXT NOT NULL,
                 symbol TEXT NOT NULL,
-                quantity REAL NOT NULL,
-                average_price REAL NOT NULL,
+                quantity DOUBLE PRECISION NOT NULL,
+                average_price DOUBLE PRECISION NOT NULL,
                 position_opened_at TEXT NOT NULL,
                 position_closed_at TEXT NULL,
-                position_closed_price REAL NULL,
-                ordinal INTEGER NOT NULL,
-                FOREIGN KEY (portfolio_id) REFERENCES portfolios(id) ON DELETE CASCADE,
-                UNIQUE (portfolio_id, symbol, position_opened_at)
+                position_closed_price DOUBLE PRECISION NULL,
+                ordinal BIGINT NOT NULL,
+                CONSTRAINT fk_positions_portfolio
+                    FOREIGN KEY (portfolio_id) REFERENCES portfolios(id) ON DELETE CASCADE,
+                CONSTRAINT positions_unique_identity
+                    UNIQUE (portfolio_id, symbol, position_opened_at)
             );
             "#,
         )
@@ -108,10 +106,6 @@ impl Database {
         Ok(())
     }
 
-    // ----------------------------
-    // Project CRUD
-    // ----------------------------
-
     pub async fn create_project(&self, project: &Project) -> Result<(), sqlx::Error> {
         let mut tx = self.pool.begin().await?;
 
@@ -119,7 +113,7 @@ impl Database {
             r#"
             INSERT INTO projects (
                 id, name, description, strategy, created_at, updated_at, interval, range, prepost
-            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
+            ) VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9)
             "#,
         )
         .bind(&project.id)
@@ -130,7 +124,7 @@ impl Database {
         .bind(&project.updated_at)
         .bind(&project.interval)
         .bind(&project.range)
-        .bind(project.prepost as i64)
+        .bind(project.prepost)
         .execute(&mut *tx)
         .await?;
 
@@ -146,7 +140,7 @@ impl Database {
             r#"
             SELECT id, name, description, strategy, created_at, updated_at, interval, range, prepost
             FROM projects
-            WHERE id = ?
+            WHERE id = $1
             "#,
         )
         .bind(id)
@@ -169,7 +163,7 @@ impl Database {
             symbols,
             interval: row.get("interval"),
             range: row.get("range"),
-            prepost: row.get::<i64, _>("prepost") != 0,
+            prepost: row.get("prepost"),
         }))
     }
 
@@ -200,7 +194,7 @@ impl Database {
                 symbols,
                 interval: row.get("interval"),
                 range: row.get("range"),
-                prepost: row.get::<i64, _>("prepost") != 0,
+                prepost: row.get("prepost"),
             });
         }
 
@@ -214,14 +208,14 @@ impl Database {
             r#"
             UPDATE projects
             SET
-                name = ?,
-                description = ?,
-                strategy = ?,
-                updated_at = ?,
-                interval = ?,
-                range = ?,
-                prepost = ?
-            WHERE id = ?
+                name = $1,
+                description = $2,
+                strategy = $3,
+                updated_at = $4,
+                interval = $5,
+                range = $6,
+                prepost = $7
+            WHERE id = $8
             "#,
         )
         .bind(&project.name)
@@ -230,7 +224,7 @@ impl Database {
         .bind(&project.updated_at)
         .bind(&project.interval)
         .bind(&project.range)
-        .bind(project.prepost as i64)
+        .bind(project.prepost)
         .bind(&project.id)
         .execute(&mut *tx)
         .await?;
@@ -240,7 +234,7 @@ impl Database {
             return Ok(false);
         }
 
-        sqlx::query("DELETE FROM project_symbols WHERE project_id = ?")
+        sqlx::query("DELETE FROM project_symbols WHERE project_id = $1")
             .bind(&project.id)
             .execute(&mut *tx)
             .await?;
@@ -253,7 +247,7 @@ impl Database {
     }
 
     pub async fn delete_project(&self, id: &str) -> Result<bool, sqlx::Error> {
-        let result = sqlx::query("DELETE FROM projects WHERE id = ?")
+        let result = sqlx::query("DELETE FROM projects WHERE id = $1")
             .bind(id)
             .execute(&self.pool)
             .await?;
@@ -270,7 +264,7 @@ impl Database {
             r#"
             SELECT COALESCE(MAX(ordinal) + 1, 0)
             FROM project_symbols
-            WHERE project_id = ?
+            WHERE project_id = $1
             "#,
         )
         .bind(project_id)
@@ -280,7 +274,7 @@ impl Database {
         sqlx::query(
             r#"
             INSERT INTO project_symbols (project_id, symbol, ordinal)
-            VALUES (?, ?, ?)
+            VALUES ($1, $2, $3)
             "#,
         )
         .bind(project_id)
@@ -300,7 +294,7 @@ impl Database {
         let result = sqlx::query(
             r#"
             DELETE FROM project_symbols
-            WHERE project_id = ? AND symbol = ?
+            WHERE project_id = $1 AND symbol = $2
             "#,
         )
         .bind(project_id)
@@ -313,7 +307,7 @@ impl Database {
 
     async fn insert_project_symbols(
         &self,
-        tx: &mut Transaction<'_, Sqlite>,
+        tx: &mut Transaction<'_, Postgres>,
         project_id: &str,
         symbols: &[String],
     ) -> Result<(), sqlx::Error> {
@@ -321,7 +315,7 @@ impl Database {
             sqlx::query(
                 r#"
                 INSERT INTO project_symbols (project_id, symbol, ordinal)
-                VALUES (?, ?, ?)
+                VALUES ($1, $2, $3)
                 "#,
             )
             .bind(project_id)
@@ -339,7 +333,7 @@ impl Database {
             r#"
             SELECT symbol
             FROM project_symbols
-            WHERE project_id = ?
+            WHERE project_id = $1
             ORDER BY ordinal ASC
             "#,
         )
@@ -350,10 +344,6 @@ impl Database {
         Ok(rows.into_iter().map(|row| row.get("symbol")).collect())
     }
 
-    // ----------------------------
-    // Portfolio CRUD
-    // ----------------------------
-
     pub async fn create_portfolio(&self, portfolio: &Portfolio) -> Result<(), sqlx::Error> {
         let mut tx = self.pool.begin().await?;
 
@@ -361,7 +351,7 @@ impl Database {
             r#"
             INSERT INTO portfolios (
                 id, name, description, created_at, updated_at
-            ) VALUES (?, ?, ?, ?, ?)
+            ) VALUES ($1, $2, $3, $4, $5)
             "#,
         )
         .bind(&portfolio.id)
@@ -384,7 +374,7 @@ impl Database {
             r#"
             SELECT id, name, description, created_at, updated_at
             FROM portfolios
-            WHERE id = ?
+            WHERE id = $1
             "#,
         )
         .bind(id)
@@ -444,10 +434,10 @@ impl Database {
             r#"
             UPDATE portfolios
             SET
-                name = ?,
-                description = ?,
-                updated_at = ?
-            WHERE id = ?
+                name = $1,
+                description = $2,
+                updated_at = $3
+            WHERE id = $4
             "#,
         )
         .bind(&portfolio.name)
@@ -462,7 +452,7 @@ impl Database {
             return Ok(false);
         }
 
-        sqlx::query("DELETE FROM positions WHERE portfolio_id = ?")
+        sqlx::query("DELETE FROM positions WHERE portfolio_id = $1")
             .bind(&portfolio.id)
             .execute(&mut *tx)
             .await?;
@@ -475,7 +465,7 @@ impl Database {
     }
 
     pub async fn delete_portfolio(&self, id: &str) -> Result<bool, sqlx::Error> {
-        let result = sqlx::query("DELETE FROM portfolios WHERE id = ?")
+        let result = sqlx::query("DELETE FROM portfolios WHERE id = $1")
             .bind(id)
             .execute(&self.pool)
             .await?;
@@ -485,7 +475,7 @@ impl Database {
 
     async fn insert_positions(
         &self,
-        tx: &mut Transaction<'_, Sqlite>,
+        tx: &mut Transaction<'_, Postgres>,
         portfolio_id: &str,
         positions: &[Position],
     ) -> Result<(), sqlx::Error> {
@@ -501,7 +491,7 @@ impl Database {
                     position_closed_at,
                     position_closed_price,
                     ordinal
-                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+                ) VALUES ($1, $2, $3, $4, $5, $6, $7, $8)
                 "#,
             )
             .bind(portfolio_id)
@@ -530,7 +520,7 @@ impl Database {
                 position_closed_at,
                 position_closed_price
             FROM positions
-            WHERE portfolio_id = ?
+            WHERE portfolio_id = $1
             ORDER BY ordinal ASC, id ASC
             "#,
         )
@@ -551,15 +541,6 @@ impl Database {
             .collect())
     }
 
-    // ----------------------------
-    // Position CRUD
-    // ----------------------------
-    //
-    // Since Position has no ID field in your model, this uses:
-    // (portfolio_id, symbol, position_opened_at)
-    // as the logical identifier for update/delete.
-    //
-
     pub async fn list_positions(&self, portfolio_id: &str) -> Result<Vec<Position>, sqlx::Error> {
         self.get_positions(portfolio_id).await
     }
@@ -573,7 +554,7 @@ impl Database {
             r#"
             SELECT COALESCE(MAX(ordinal) + 1, 0)
             FROM positions
-            WHERE portfolio_id = ?
+            WHERE portfolio_id = $1
             "#,
         )
         .bind(portfolio_id)
@@ -591,7 +572,7 @@ impl Database {
                 position_closed_at,
                 position_closed_price,
                 ordinal
-            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+            ) VALUES ($1, $2, $3, $4, $5, $6, $7, $8)
             "#,
         )
         .bind(portfolio_id)
@@ -619,16 +600,16 @@ impl Database {
             r#"
             UPDATE positions
             SET
-                symbol = ?,
-                quantity = ?,
-                average_price = ?,
-                position_opened_at = ?,
-                position_closed_at = ?,
-                position_closed_price = ?
+                symbol = $1,
+                quantity = $2,
+                average_price = $3,
+                position_opened_at = $4,
+                position_closed_at = $5,
+                position_closed_price = $6
             WHERE
-                portfolio_id = ?
-                AND symbol = ?
-                AND position_opened_at = ?
+                portfolio_id = $7
+                AND symbol = $8
+                AND position_opened_at = $9
             "#,
         )
         .bind(&updated.symbol)
@@ -656,9 +637,9 @@ impl Database {
             r#"
             DELETE FROM positions
             WHERE
-                portfolio_id = ?
-                AND symbol = ?
-                AND position_opened_at = ?
+                portfolio_id = $1
+                AND symbol = $2
+                AND position_opened_at = $3
             "#,
         )
         .bind(portfolio_id)

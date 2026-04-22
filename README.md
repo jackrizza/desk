@@ -17,10 +17,11 @@ Today the app supports:
 desk/
 |- crates/
 |  |- cache/        # stock data caching
-|  |- database/     # SQLite persistence
+|  |- database/     # PostgreSQL persistence
 |  |- models/       # shared API and database models
-|  |- openapi/      # Poem OpenAPI server
 |  |- stock_data/   # market data fetch and indicator calculations
+|- apps/
+|  |- openapi/      # Poem OpenAPI server
 |  |- test_bench/   # local experimentation binary
 |- frontend/        # React Router + Vite frontend
 |- docs/            # project documentation
@@ -30,7 +31,7 @@ desk/
 
 - Rust workspace
 - Poem + Poem OpenAPI
-- SQLite
+- PostgreSQL
 - React 19
 - React Router 7
 - Vite
@@ -69,12 +70,29 @@ desk/
 - Rust toolchain
 - Node.js 20+
 - npm
+- Docker Desktop or Docker Engine for the containerized stack
+
+### Start the full stack with Docker
+
+From the repository root:
+
+```bash
+Copy-Item .env.example .env
+docker compose up --build
+```
+
+The containerized stack starts:
+
+- frontend: `http://localhost:5173`
+- API + Swagger UI: `http://localhost:3000`
+- PostgreSQL: `localhost:5432`
 
 ### Start the backend
 
 From the repository root:
 
 ```bash
+$env:DATABASE_URL="postgres://desk:desk@localhost:5432/desk"
 cargo run -p openapi
 ```
 
@@ -114,13 +132,12 @@ npm run build
 
 ## Data and Local State
 
-- SQLite data is stored in `db.sql`
-- cached market data is stored in `cache_data/`
+- PostgreSQL data is stored in the `postgres_data` Docker volume when using Compose
+- cached market data is stored in `cache_data/` locally or the `openapi_cache` Docker volume in Compose
 - OpenAI API keys are currently stored in browser local storage from the Settings modal
 
 Important:
 
-- `db.sql` is ignored from git
 - `cache_data/` is ignored from git
 - browser-stored API keys are for local development only and should not be used as the long-term production security model
 
@@ -157,4 +174,3 @@ More detail lives in [docs/API.md](C:\Users\jack\OneDrive\Documents\Code\Rust\de
 - replace prototype backtesting with structured executable strategy rules
 - expand live trading workflow beyond placeholders
 - improve market-route code splitting for smaller frontend bundles
-
