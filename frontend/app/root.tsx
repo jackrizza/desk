@@ -5,6 +5,7 @@ import {
   Outlet,
   Scripts,
   ScrollRestoration,
+  useNavigation,
 } from "react-router";
 
 import type { Route } from "./+types/root";
@@ -57,7 +58,35 @@ export function Layout({ children }: { children: React.ReactNode }) {
 }
 
 export default function App() {
-  return <Outlet />;
+  const navigation = useNavigation();
+  const isNavigating =
+    navigation.state !== "idle" && navigation.location != null;
+
+  return (
+    <>
+      <Outlet />
+      {isNavigating ? <RouteLoadingOverlay /> : null}
+    </>
+  );
+}
+
+function RouteLoadingOverlay() {
+  return (
+    <div className="app-route-loading fixed inset-0 z-50 flex items-center justify-center px-6">
+      <div className="app-route-loading-panel flex w-full max-w-md flex-col items-center gap-4 rounded-3xl px-8 py-10 text-center shadow-xl">
+        <div className="app-route-loading-spinner h-12 w-12 rounded-full" />
+        <div className="space-y-2">
+          <p className="text-xs font-semibold uppercase tracking-[0.24em] app-text-muted">
+            Loading Route
+          </p>
+          <h2 className="text-2xl font-semibold">Opening workspace</h2>
+          <p className="app-text-muted text-sm leading-6">
+            Pulling together the next view.
+          </p>
+        </div>
+      </div>
+    </div>
+  );
 }
 
 export function ErrorBoundary({ error }: Route.ErrorBoundaryProps) {

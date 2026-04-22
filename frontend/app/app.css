@@ -144,3 +144,31 @@ body {
 .app-modal-backdrop {
   background: var(--color-overlay);
 }
+
+.app-route-loading {
+  background:
+    radial-gradient(circle at top, color-mix(in srgb, var(--color-primary) 20%, transparent), transparent 45%),
+    color-mix(in srgb, var(--color-overlay) 88%, var(--color-background));
+  backdrop-filter: blur(12px);
+}
+
+.app-route-loading-panel {
+  background: color-mix(in srgb, var(--color-surface-strong) 92%, transparent);
+  border: 1px solid color-mix(in srgb, var(--color-primary) 18%, var(--color-border));
+}
+
+.app-route-loading-spinner {
+  border: 3px solid color-mix(in srgb, var(--color-primary) 18%, transparent);
+  border-top-color: var(--color-primary);
+  animation: app-route-spin 0.85s linear infinite;
+}
+
+@keyframes app-route-spin {
+  from {
+    transform: rotate(0deg);
+  }
+
+  to {
+    transform: rotate(360deg);
+  }
+}

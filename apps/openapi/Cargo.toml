@@ -8,10 +8,10 @@ poem = "3"
 poem-openapi = { version = "5", features = ["swagger-ui"]}
 tokio = { version = "1", features = ["full"] }
 
-cache = { path = "../cache" }
-models = { path = "../models" }
-database = { path = "../database" }
-stock_data = { path = "../stock_data" }
+cache = { path = "../../crates/cache" }
+models = { path = "../../crates/models" }
+database = { path = "../../crates/database" }
+stock_data = { path = "../../crates/stock_data" }
 
 env_logger = "0.11.10"
 log = "0.4.29"

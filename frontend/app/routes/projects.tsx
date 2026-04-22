@@ -1,4 +1,4 @@
-import { useEffect, useMemo, useState } from "react";
+import { useEffect, useMemo, useRef, useState } from "react";
 import { useNavigate, useParams } from "react-router";
 import { LeftSidebar } from "../components/LeftSidebar";
 import { Topbar } from "../components/Topbar";
@@ -6,6 +6,7 @@ import { deskApi, type Project, type RawStockData } from "../lib/api";
 import { useDeskChat } from "../lib/chat";
 
 type ProjectTab = "build" | "backtest" | "live";
+type BuildPanelTab = "chat" | "draft";
 
 type BacktestBar = {
   date: string;
@@ -63,6 +64,14 @@ function formatCurrency(value: number) {
 
 function formatPercent(value: number) {
   return `${value >= 0 ? "+" : ""}${value.toFixed(2)}%`;
+}
+
+function serialize(value: unknown) {
+  return JSON.stringify(value);
+}
+
+function normalizeProjectTab(value?: string): ProjectTab {
+  return value === "backtest" || value === "live" ? value : "build";
 }
 
 function summarizeLatestAssistantMessage(messages: ReturnType<typeof useDeskChat>["messages"]) {
@@ -293,13 +302,21 @@ export default function ProjectsRoute() {
   const [quoteSymbol, setQuoteSymbol] = useState("AAPL");
   const [projects, setProjects] = useState<Project[]>([]);
   const [loading, setLoading] = useState(true);
+  const [hydrated, setHydrated] = useState(false);
   const [errorMessage, setErrorMessage] = useState("");
   const [strategyPrompt, setStrategyPrompt] = useState("");
-  const [activeTab, setActiveTab] = useState<ProjectTab>("build");
+  const [buildPanelTab, setBuildPanelTab] = useState<BuildPanelTab>("chat");
   const [backtestLoading, setBacktestLoading] = useState(false);
   const [backtestResults, setBacktestResults] = useState<BacktestResult[]>([]);
   const [savePending, setSavePending] = useState(false);
   const [saveMessage, setSaveMessage] = useState("");
+  const projectsSnapshotRef = useRef("");
+  const backtestSignatureRef = useRef("");
+  const chatScrollRef = useRef<HTMLDivElement | null>(null);
+
+  useEffect(() => {
+    setHydrated(true);
+  }, []);
 
   useEffect(() => {
     let cancelled = false;
@@ -311,7 +328,11 @@ export default function ProjectsRoute() {
           return;
         }
 
-        setProjects(nextProjects);
+        const nextSnapshot = serialize(nextProjects);
+        if (projectsSnapshotRef.current !== nextSnapshot) {
+          projectsSnapshotRef.current = nextSnapshot;
+          setProjects(nextProjects);
+        }
         setErrorMessage("");
       } catch (error) {
         if (!cancelled) {
@@ -345,20 +366,25 @@ export default function ProjectsRoute() {
 
     return projects.find((project) => project.id === params.projectId) ?? projects[0] ?? null;
   }, [params.projectId, projects]);
+  const activeTab = normalizeProjectTab(params.tab);
 
   useEffect(() => {
     if (!projects.length || !selectedProject) {
       return;
     }
 
-    if (params.projectId !== selectedProject.id) {
-      navigate(`/projects/${encodeURIComponent(selectedProject.id)}`, { replace: true });
+    const targetTab = normalizeProjectTab(params.tab);
+    const targetPath = `/projects/${encodeURIComponent(selectedProject.id)}/${targetTab}`;
+
+    if (params.projectId !== selectedProject.id || params.tab !== targetTab) {
+      navigate(targetPath, { replace: true });
     }
-  }, [navigate, params.projectId, projects.length, selectedProject]);
+  }, [navigate, params.projectId, params.tab, projects.length, selectedProject]);
 
   useEffect(() => {
     setStrategyPrompt("");
     setSaveMessage("");
+    setBuildPanelTab("chat");
   }, [selectedProject?.id]);
 
   const chat = useDeskChat({
@@ -374,6 +400,41 @@ export default function ProjectsRoute() {
 
   const assistantDraft = summarizeLatestAssistantMessage(chat.messages);
   const strategyDraft = assistantDraft.trim() || selectedProject?.strategy || "";
+  const canEditStrategy = hydrated && Boolean(selectedProject);
+  const backtestSignature = useMemo(
+    () =>
+      serialize({
+        activeTab,
+        projectId: selectedProject?.id ?? "",
+        symbols: selectedProject?.symbols ?? [],
+        interval: selectedProject?.interval ?? "",
+        range: selectedProject?.range ?? "",
+        prepost: selectedProject?.prepost ?? false,
+        strategyDraft,
+      }),
+    [
+      activeTab,
+      selectedProject?.id,
+      selectedProject?.symbols,
+      selectedProject?.interval,
+      selectedProject?.range,
+      selectedProject?.prepost,
+      strategyDraft,
+    ],
+  );
+
+  useEffect(() => {
+    if (buildPanelTab !== "chat") {
+      return;
+    }
+
+    const container = chatScrollRef.current;
+    if (!container) {
+      return;
+    }
+
+    container.scrollTop = container.scrollHeight;
+  }, [buildPanelTab, chat.messages, chat.pending]);
 
   useEffect(() => {
     let cancelled = false;
@@ -382,9 +443,15 @@ export default function ProjectsRoute() {
       if (activeTab !== "backtest" || !selectedProject?.symbols.length) {
         setBacktestResults([]);
         setBacktestLoading(false);
+        backtestSignatureRef.current = "";
         return;
       }
 
+      if (backtestSignatureRef.current === backtestSignature) {
+        return;
+      }
+
+      backtestSignatureRef.current = backtestSignature;
       setBacktestLoading(true);
 
       try {
@@ -424,7 +491,15 @@ export default function ProjectsRoute() {
     return () => {
       cancelled = true;
     };
-  }, [activeTab, selectedProject, strategyDraft]);
+  }, [
+    activeTab,
+    backtestSignature,
+    selectedProject?.symbols,
+    selectedProject?.range,
+    selectedProject?.interval,
+    selectedProject?.prepost,
+    strategyDraft,
+  ]);
 
   function handleLookup() {
     const nextSymbol = quoteSymbol.trim().toUpperCase();
@@ -433,6 +508,14 @@ export default function ProjectsRoute() {
     }
 
     navigate(`/market/${encodeURIComponent(nextSymbol)}`);
+  }
+
+  function navigateToProjectTab(tab: ProjectTab) {
+    if (!selectedProject) {
+      return;
+    }
+
+    navigate(`/projects/${encodeURIComponent(selectedProject.id)}/${tab}`);
   }
 
   async function handleStrategySubmit(event: React.FormEvent<HTMLFormElement>) {
@@ -490,7 +573,7 @@ export default function ProjectsRoute() {
     );
 
     setStrategyPrompt(prompt);
-    setActiveTab("build");
+    navigateToProjectTab("build");
     setSaveMessage("Backtest review has been turned into a refinement prompt.");
   }
 
@@ -526,7 +609,7 @@ export default function ProjectsRoute() {
             <button
               key={tab.key}
               type="button"
-              onClick={() => setActiveTab(tab.key)}
+              onClick={() => navigateToProjectTab(tab.key)}
               className="rounded-full px-4 py-2 text-sm font-medium transition"
               style={
                 activeTab === tab.key
@@ -553,32 +636,6 @@ export default function ProjectsRoute() {
                 <p className="app-text-muted mt-3 text-sm leading-6">
                   {selectedProject?.description || "Use this workspace to turn a project idea into an algorithmic strategy based on the symbols tracked in that project."}
                 </p>
-              </article>
-
-              <article className="app-surface rounded-3xl p-5 shadow-sm">
-                <div className="mb-4 flex items-center justify-between gap-3">
-                  <div>
-                    <p className="app-text-muted text-xs uppercase tracking-[0.18em]">Select Project</p>
-                    <p className="mt-2 text-sm font-medium">Choose the symbol universe for this strategy.</p>
-                  </div>
-                </div>
-                <select
-                  value={selectedProject?.id ?? ""}
-                  onChange={(event) => navigate(`/projects/${encodeURIComponent(event.target.value)}`)}
-                  className="app-input w-full rounded-2xl px-3 py-3 text-sm"
-                  disabled={projects.length === 0}
-                >
-                  {projects.map((project) => (
-                    <option key={project.id} value={project.id}>
-                      {project.name}
-                    </option>
-                  ))}
-                </select>
-                {!projects.length && !loading ? (
-                  <p className="app-text-muted mt-3 text-sm">
-                    Create a project first to start building a strategy workspace.
-                  </p>
-                ) : null}
               </article>
 
               <article className="app-surface rounded-3xl p-5 shadow-sm">
@@ -609,103 +666,142 @@ export default function ProjectsRoute() {
             </aside>
           ) : null}
 
-          <section className="grid min-w-0 gap-6">
+          <section className={`grid min-w-0 gap-6 ${activeTab === "build" ? "xl:h-[calc(95vh-8.5rem)]" : ""}`}>
             {activeTab === "build" ? (
               <>
-                <article className="app-surface rounded-3xl p-5 shadow-sm">
+                <article className="app-surface flex min-h-[calc(95vh-10rem)] flex-col rounded-3xl p-5 shadow-sm xl:h-[calc(95vh-8.5rem)] xl:min-h-0">
                   <div className="mb-4 flex flex-wrap items-center justify-between gap-3">
                     <div>
                       <p className="app-text-muted text-xs uppercase tracking-[0.22em]">Strategy Builder</p>
                       <h2 className="mt-2 text-2xl font-semibold">Chat your rules into shape</h2>
                     </div>
-                    <div className="flex flex-wrap items-center gap-2">
-                      <button
-                        type="button"
-                        onClick={handleSaveStrategy}
-                        disabled={!selectedProject || savePending || !strategyDraft.trim()}
-                        className="app-button-primary rounded-full px-4 py-2 text-sm font-medium disabled:cursor-not-allowed disabled:opacity-60"
-                      >
-                        {savePending ? "Saving..." : "Save strategy"}
-                      </button>
-                      <button
-                        type="button"
-                        onClick={chat.clearMessages}
-                        className="app-button-secondary rounded-full px-4 py-2 text-sm font-medium"
-                      >
-                        Reset chat
-                      </button>
-                    </div>
-                  </div>
-
-                  <div className="app-surface-muted h-[28rem] overflow-y-auto rounded-2xl p-4">
-                    <div className="space-y-4">
-                      {chat.messages.map((message) => (
-                        <article
-                          key={message.id}
-                          className={`max-w-[85%] rounded-2xl px-4 py-3 ${
-                            message.role === "user" ? "ml-auto app-button-primary" : "app-surface"
-                          }`}
+                    {hydrated ? (
+                      <div className="flex flex-wrap items-center gap-2">
+                        <button
+                          type="button"
+                          onClick={handleSaveStrategy}
+                          disabled={!canEditStrategy || savePending || !strategyDraft.trim()}
+                          className="app-button-primary rounded-full px-4 py-2 text-sm font-medium disabled:cursor-not-allowed disabled:opacity-60"
                         >
-                          <div className="mb-2 flex items-center justify-between gap-3">
-                            <p className="text-xs font-semibold uppercase tracking-[0.16em]">
-                              {message.role === "user" ? "You" : "Desk"}
-                            </p>
-                            <p className="app-text-muted text-xs">{formatTimestamp(message.createdAt)}</p>
-                          </div>
-                          <p className="whitespace-pre-wrap text-sm leading-6">{message.content}</p>
-                        </article>
-                      ))}
-                      {chat.pending ? (
-                        <div className="app-surface max-w-[85%] rounded-2xl px-4 py-3">
-                          <p className="app-text-muted text-sm">Desk is drafting your strategy...</p>
-                        </div>
-                      ) : null}
-                    </div>
+                          {savePending ? "Saving..." : "Save strategy"}
+                        </button>
+                        <button
+                          type="button"
+                          onClick={chat.clearMessages}
+                          className="app-button-secondary rounded-full px-4 py-2 text-sm font-medium"
+                        >
+                          Reset chat
+                        </button>
+                      </div>
+                    ) : (
+                      <div className="flex flex-wrap items-center gap-2">
+                        <div className="app-surface-muted h-10 w-28 rounded-full" />
+                        <div className="app-surface-muted h-10 w-24 rounded-full" />
+                      </div>
+                    )}
                   </div>
 
-                  <form className="mt-4 space-y-3" onSubmit={handleStrategySubmit}>
-                    <textarea
-                      value={strategyPrompt}
-                      onChange={(event) => setStrategyPrompt(event.target.value)}
-                      rows={5}
-                      placeholder="Describe the trading pattern you want to build, for example: Buy when one of these symbols closes above the 20-day high on expanding volume, then trail a stop under the 10-day low."
-                      className="app-input w-full rounded-2xl px-4 py-3 text-sm"
-                      disabled={!selectedProject}
-                    />
-                    <div className="flex justify-end">
+                  <div className="mb-4 flex flex-wrap gap-2">
+                    {([
+                      { key: "chat", label: "Chat" },
+                      { key: "draft", label: "Working draft" },
+                    ] as Array<{ key: BuildPanelTab; label: string }>).map((tab) => (
                       <button
-                        type="submit"
-                        disabled={!selectedProject || chat.pending}
-                        className="app-button-primary rounded-full px-5 py-2.5 text-sm font-medium disabled:cursor-not-allowed disabled:opacity-60"
+                        key={tab.key}
+                        type="button"
+                        onClick={() => setBuildPanelTab(tab.key)}
+                        className="rounded-full px-4 py-2 text-sm font-medium transition"
+                        style={
+                          buildPanelTab === tab.key
+                            ? {
+                                background: "color-mix(in srgb, var(--color-primary) 14%, transparent)",
+                                color: "var(--color-primary)",
+                              }
+                            : undefined
+                        }
                       >
-                        Build strategy
+                        {tab.label}
                       </button>
-                    </div>
-                  </form>
-                </article>
+                    ))}
+                  </div>
 
-                <article className="app-surface rounded-3xl p-5 shadow-sm">
-                  <div className="mb-4 flex items-center justify-between gap-3">
-                    <div>
-                      <p className="app-text-muted text-xs uppercase tracking-[0.22em]">Working Draft</p>
-                      <h2 className="mt-2 text-2xl font-semibold">Strategy outline</h2>
+                  {buildPanelTab === "chat" ? (
+                    <div className="app-surface-muted min-h-0 flex-1 rounded-2xl p-4">
+                      <div ref={chatScrollRef} className="h-full overflow-y-auto pr-1">
+                        <div className="space-y-4">
+                          {chat.messages.map((message) => (
+                            <article
+                              key={message.id}
+                              className={`max-w-[85%] rounded-2xl px-4 py-3 ${
+                                message.role === "user" ? "ml-auto app-button-primary" : "app-surface"
+                              }`}
+                            >
+                              <div className="mb-2 flex items-center justify-between gap-3">
+                                <p className="text-xs font-semibold uppercase tracking-[0.16em]">
+                                  {message.role === "user" ? "You" : "Desk"}
+                                </p>
+                                <p className="app-text-muted text-xs">{formatTimestamp(message.createdAt)}</p>
+                              </div>
+                              <p className="whitespace-pre-wrap text-sm leading-6">{message.content}</p>
+                            </article>
+                          ))}
+                          {chat.pending ? (
+                            <div className="app-surface max-w-[85%] rounded-2xl px-4 py-3">
+                              <p className="app-text-muted text-sm">Desk is drafting your strategy...</p>
+                            </div>
+                          ) : null}
+                        </div>
+                      </div>
                     </div>
-                  </div>
-                  <div className="app-surface-muted rounded-2xl p-4">
-                    <p className="whitespace-pre-wrap text-sm leading-7">
-                      {strategyDraft || "Start describing the pattern you want, and Desk will turn it into a strategy outline."}
-                    </p>
-                  </div>
-                  <div className="mt-4 flex flex-wrap items-center justify-between gap-3">
-                    <p className="app-text-muted text-sm">
-                      {selectedProject?.strategy.trim()
-                        ? "Saved strategy is available for this project."
-                        : "No saved strategy yet. Save the current draft when it looks right."}
-                    </p>
-                    {saveMessage ? (
-                      <p className="app-text-muted text-sm">{saveMessage}</p>
-                    ) : null}
-                  </div>
+                  ) : (
+                    <div className="app-surface-muted flex min-h-0 flex-1 flex-col rounded-2xl p-4">
+                      <div className="mb-4 flex items-center justify-between gap-3">
+                        <div>
+                          <p className="app-text-muted text-xs uppercase tracking-[0.22em]">Working Draft</p>
+                          <p className="mt-2 text-sm">
+                            Keep the saved strategy tight and execution-ready.
+                          </p>
+                        </div>
+                        {saveMessage ? (
+                          <p className="app-text-muted text-sm">{saveMessage}</p>
+                        ) : null}
+                      </div>
+                      <div className="app-surface min-h-0 flex-1 overflow-y-auto rounded-2xl p-4">
+                        <p className="whitespace-pre-wrap text-sm leading-7">
+                          {strategyDraft || "Start describing the pattern you want, and Desk will turn it into a strategy outline."}
+                        </p>
+                      </div>
+                    </div>
+                  )}
+
+                  {hydrated ? (
+                    <form className="mt-4 space-y-3" onSubmit={handleStrategySubmit}>
+                      <textarea
+                        value={strategyPrompt}
+                        onChange={(event) => setStrategyPrompt(event.target.value)}
+                        rows={5}
+                        placeholder="Describe the trading pattern you want to build, for example: Buy when one of these symbols closes above the 20-day high on expanding volume, then trail a stop under the 10-day low."
+                        className="app-input w-full rounded-2xl px-4 py-3 text-sm"
+                        disabled={!canEditStrategy}
+                      />
+                      <div className="flex justify-end">
+                        <button
+                          type="submit"
+                          disabled={!canEditStrategy || chat.pending}
+                          className="app-button-primary rounded-full px-5 py-2.5 text-sm font-medium disabled:cursor-not-allowed disabled:opacity-60"
+                        >
+                          Build strategy
+                        </button>
+                      </div>
+                    </form>
+                  ) : (
+                    <div className="mt-4 space-y-3">
+                      <div className="app-surface-muted h-36 rounded-2xl" />
+                      <div className="flex justify-end">
+                        <div className="app-surface-muted h-10 w-32 rounded-full" />
+                      </div>
+                    </div>
+                  )}
                 </article>
               </>
             ) : null}
