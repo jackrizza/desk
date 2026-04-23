@@ -1,11 +1,19 @@
+use models::engine::{
+    ActiveSymbolsResponse, EngineEventRequest, EngineHealthResponse, EngineHeartbeatRequest,
+};
+use models::paper::{CreatePaperAccountRequest, CreatePaperOrderRequest};
 use models::raw::{RawStockData, StockIndicatorsResponse};
 use models::{
     portfolio::{Portfolio, Position},
     projects::Project,
+    trading::{
+        CreateStrategySignalRequest, UpdateStrategyRiskConfigRequest,
+        UpdateStrategySignalStatusRequest, UpdateStrategyTradingConfigRequest,
+        UpsertStrategyRuntimeStateRequest,
+    },
 };
 use poem::{
-    EndpointExt,
-    Route,
+    EndpointExt, Route,
     http::{HeaderValue, Method},
     listener::TcpListener,
     middleware::Cors,
@@ -21,17 +29,31 @@ use std::{env, sync::Arc};
 use cache::Cache;
 use database::Database;
 use stock_data::calculate_indicators;
+use tracing_subscriber::FmtSubscriber;
 
 use env_logger;
 use log::{error, info};
 
 mod helpers;
+mod paper;
+mod strategy_execution;
+mod strategy_risk;
+mod strategy_trading;
 
 use helpers::{
-    ApiTags, CreatePortfolioResponse, CreatePositionResponse, CreateProjectResponse,
-    DeletePortfolioResponse, DeletePositionResponse, DeleteProjectResponse, GetPortfolioResponse,
-    GetPositionResponse, GetProjectResponse, ListPortfoliosResponse, ListPositionsResponse,
-    ListProjectsResponse, UpdatePortfolioResponse, UpdatePositionResponse, UpdateProjectResponse,
+    ActiveSymbolsConfigResponse, ApiTags, CancelPaperOrderResponse, CreatePaperAccountResponse,
+    CreatePortfolioResponse, CreatePositionResponse, CreateProjectResponse,
+    CreateStrategySignalResponse, DeletePortfolioResponse, DeletePositionResponse,
+    DeleteProjectResponse, EngineMutationResponse, EngineStrategyConfigApiResponse,
+    ExecutePaperOrderResponse, GetPaperAccountResponse, GetPortfolioResponse, GetPositionResponse,
+    GetProjectResponse, GetStrategyRiskConfigResponse, GetStrategyRuntimeStateResponse,
+    GetStrategySignalsResponse, GetStrategyTradingConfigResponse, ListPaperAccountsResponse,
+    ListPaperEventsResponse, ListPaperFillsResponse, ListPaperOrdersResponse,
+    ListPaperPositionsResponse, ListPortfoliosResponse, ListPositionsResponse,
+    ListProjectsResponse, PaperAccountSummaryApiResponse, StrategyRiskMutationResponse,
+    UpdatePortfolioResponse, UpdatePositionResponse, UpdateProjectResponse,
+    UpdateStrategyRiskConfigResponse, UpdateStrategySignalResponse,
+    UpdateStrategyTradingConfigResponse, UpsertStrategyRuntimeStateResponse, error_message,
     internal_error,
 };
 
@@ -57,6 +79,155 @@ impl Api {
     #[oai(path = "/health", method = "get")]
     async fn health(&self) -> PlainText<&'static str> {
         PlainText("ok")
+    }
+
+    #[oai(path = "/health/live", method = "get", tag = "ApiTags::Engine")]
+    async fn health_live(&self) -> Json<EngineHealthResponse> {
+        Json(EngineHealthResponse {
+            status: "ok".to_string(),
+        })
+    }
+
+    #[oai(
+        path = "/engine/config/symbols",
+        method = "get",
+        tag = "ApiTags::Engine"
+    )]
+    async fn engine_config_symbols(&self) -> ActiveSymbolsConfigResponse {
+        match self.database.list_active_symbols().await {
+            Ok(symbols) => {
+                info!("engine active symbols loaded: {:?}", symbols);
+                ActiveSymbolsConfigResponse::Ok(Json(ActiveSymbolsResponse { symbols }))
+            }
+            Err(err) => {
+                error!("failed to load engine active symbols: {}", err);
+                ActiveSymbolsConfigResponse::InternalError(internal_error(err))
+            }
+        }
+    }
+
+    #[oai(
+        path = "/engine/config/strategies",
+        method = "get",
+        tag = "ApiTags::Engine"
+    )]
+    async fn engine_config_strategies(&self) -> EngineStrategyConfigApiResponse {
+        match strategy_trading::list_engine_strategy_configs(&self.database).await {
+            Ok(configs) => EngineStrategyConfigApiResponse::Ok(Json(configs)),
+            Err(err) => EngineStrategyConfigApiResponse::InternalError(error_message(err.message)),
+        }
+    }
+
+    #[oai(path = "/engine/heartbeat", method = "post", tag = "ApiTags::Engine")]
+    async fn engine_heartbeat(
+        &self,
+        heartbeat: Json<EngineHeartbeatRequest>,
+    ) -> EngineMutationResponse {
+        let heartbeat = heartbeat.0;
+
+        match self.database.insert_engine_heartbeat(&heartbeat).await {
+            Ok(record) => {
+                info!(
+                    "engine heartbeat persisted: id={}, engine_name={}, status={}, timestamp={}",
+                    record.id, record.engine_name, record.status, record.timestamp
+                );
+                EngineMutationResponse::Ok(Json(EngineHealthResponse {
+                    status: "ok".to_string(),
+                }))
+            }
+            Err(err) => {
+                error!(
+                    "failed to persist engine heartbeat: engine_name={}, status={}, error={}",
+                    heartbeat.engine_name, heartbeat.status, err
+                );
+                EngineMutationResponse::InternalError(internal_error(err))
+            }
+        }
+    }
+
+    #[oai(path = "/engine/events", method = "post", tag = "ApiTags::Engine")]
+    async fn engine_events(&self, event: Json<EngineEventRequest>) -> EngineMutationResponse {
+        let event = event.0;
+
+        match self.database.insert_engine_event(&event).await {
+            Ok(record) => {
+                info!(
+                    "engine event persisted: id={}, engine_name={}, event_type={}, symbol={:?}, timestamp={}",
+                    record.id,
+                    record.engine_name,
+                    record.event_type,
+                    record.symbol,
+                    record.timestamp
+                );
+                EngineMutationResponse::Ok(Json(EngineHealthResponse {
+                    status: "ok".to_string(),
+                }))
+            }
+            Err(err) => {
+                error!(
+                    "failed to persist engine event: engine_name={}, event_type={}, symbol={:?}, error={}",
+                    event.engine_name, event.event_type, event.symbol, err
+                );
+                EngineMutationResponse::InternalError(internal_error(err))
+            }
+        }
+    }
+
+    #[oai(
+        path = "/engine/strategy-signals",
+        method = "post",
+        tag = "ApiTags::Engine"
+    )]
+    async fn engine_strategy_signals(
+        &self,
+        request: Json<CreateStrategySignalRequest>,
+    ) -> CreateStrategySignalResponse {
+        match strategy_execution::create_signal(&self.database, request.0).await {
+            Ok(signal) => CreateStrategySignalResponse::Created(Json(signal)),
+            Err(message) if message.contains("must") || message.contains("invalid") => {
+                CreateStrategySignalResponse::BadRequest(error_message(message))
+            }
+            Err(message) => CreateStrategySignalResponse::InternalError(error_message(message)),
+        }
+    }
+
+    #[oai(
+        path = "/engine/strategy-signals/:signal_id",
+        method = "post",
+        tag = "ApiTags::Engine"
+    )]
+    async fn update_engine_strategy_signal(
+        &self,
+        signal_id: Path<String>,
+        request: Json<UpdateStrategySignalStatusRequest>,
+    ) -> UpdateStrategySignalResponse {
+        match strategy_execution::update_signal(&self.database, &signal_id.0, request.0).await {
+            Ok(()) => UpdateStrategySignalResponse::Ok,
+            Err(message) if message.contains("invalid") || message.contains("must") => {
+                UpdateStrategySignalResponse::BadRequest(error_message(message))
+            }
+            Err(message) => UpdateStrategySignalResponse::InternalError(error_message(message)),
+        }
+    }
+
+    #[oai(
+        path = "/engine/strategy-runtime-state",
+        method = "post",
+        tag = "ApiTags::Engine"
+    )]
+    async fn engine_strategy_runtime_state(
+        &self,
+        request: Json<UpsertStrategyRuntimeStateRequest>,
+    ) -> UpsertStrategyRuntimeStateResponse {
+        match strategy_execution::upsert_runtime_state(&self.database, request.0).await {
+            Ok(state) => UpsertStrategyRuntimeStateResponse::Ok(Json(state)),
+            Err(message) if message.contains("must") || message.contains("invalid") => {
+                UpsertStrategyRuntimeStateResponse::BadRequest(error_message(message))
+            }
+            Err(message) => {
+                UpsertStrategyRuntimeStateResponse::InternalError(error_message(message))
+            }
+        }
     }
 
     #[oai(path = "/stock_data", method = "get")]
@@ -118,6 +289,379 @@ impl Api {
                     unsupported: requested,
                 })
             }
+        }
+    }
+
+    // ----------------------------
+    // Paper Trading
+    // ----------------------------
+
+    #[oai(path = "/paper/accounts", method = "post", tag = "ApiTags::Paper")]
+    async fn create_paper_account(
+        &self,
+        request: Json<CreatePaperAccountRequest>,
+    ) -> CreatePaperAccountResponse {
+        match paper::create_account(&self.database, request.0).await {
+            Ok(account) => CreatePaperAccountResponse::Created(Json(account)),
+            Err(err) => match err.kind {
+                paper::PaperErrorKind::BadRequest => {
+                    CreatePaperAccountResponse::BadRequest(error_message(err.message))
+                }
+                paper::PaperErrorKind::Internal => {
+                    CreatePaperAccountResponse::InternalError(error_message(err.message))
+                }
+                _ => CreatePaperAccountResponse::InternalError(error_message(err.message)),
+            },
+        }
+    }
+
+    #[oai(path = "/paper/accounts", method = "get", tag = "ApiTags::Paper")]
+    async fn list_paper_accounts(&self) -> ListPaperAccountsResponse {
+        match paper::list_accounts(&self.database).await {
+            Ok(accounts) => ListPaperAccountsResponse::Ok(Json(accounts)),
+            Err(err) => ListPaperAccountsResponse::InternalError(error_message(err.message)),
+        }
+    }
+
+    #[oai(
+        path = "/paper/accounts/:account_id",
+        method = "get",
+        tag = "ApiTags::Paper"
+    )]
+    async fn get_paper_account(&self, account_id: Path<String>) -> GetPaperAccountResponse {
+        match paper::get_account(&self.database, &account_id.0).await {
+            Ok(account) => GetPaperAccountResponse::Ok(Json(account)),
+            Err(err) => match err.kind {
+                paper::PaperErrorKind::NotFound => {
+                    GetPaperAccountResponse::NotFound(error_message(err.message))
+                }
+                _ => GetPaperAccountResponse::InternalError(error_message(err.message)),
+            },
+        }
+    }
+
+    #[oai(
+        path = "/paper/accounts/:account_id/summary",
+        method = "get",
+        tag = "ApiTags::Paper"
+    )]
+    async fn get_paper_account_summary(
+        &self,
+        account_id: Path<String>,
+    ) -> PaperAccountSummaryApiResponse {
+        match paper::get_account_summary(&self.database, &self.cache, &account_id.0).await {
+            Ok(summary) => PaperAccountSummaryApiResponse::Ok(Json(summary)),
+            Err(err) => match err.kind {
+                paper::PaperErrorKind::NotFound => {
+                    PaperAccountSummaryApiResponse::NotFound(error_message(err.message))
+                }
+                _ => PaperAccountSummaryApiResponse::InternalError(error_message(err.message)),
+            },
+        }
+    }
+
+    #[oai(path = "/paper/orders", method = "post", tag = "ApiTags::Paper")]
+    async fn create_paper_order(
+        &self,
+        request: Json<CreatePaperOrderRequest>,
+    ) -> ExecutePaperOrderResponse {
+        match paper::execute_paper_market_order(&self.database, &self.cache, request.0).await {
+            Ok(result) => ExecutePaperOrderResponse::Ok(Json(result)),
+            Err(err) => match err.kind {
+                paper::PaperErrorKind::BadRequest => {
+                    ExecutePaperOrderResponse::BadRequest(error_message(err.message))
+                }
+                paper::PaperErrorKind::NotFound => {
+                    ExecutePaperOrderResponse::NotFound(error_message(err.message))
+                }
+                paper::PaperErrorKind::Conflict => {
+                    ExecutePaperOrderResponse::Conflict(error_message(err.message))
+                }
+                paper::PaperErrorKind::Internal => {
+                    ExecutePaperOrderResponse::InternalError(error_message(err.message))
+                }
+            },
+        }
+    }
+
+    #[oai(
+        path = "/paper/accounts/:account_id/orders",
+        method = "get",
+        tag = "ApiTags::Paper"
+    )]
+    async fn list_paper_orders(&self, account_id: Path<String>) -> ListPaperOrdersResponse {
+        match paper::list_orders(&self.database, &account_id.0).await {
+            Ok(orders) => ListPaperOrdersResponse::Ok(Json(orders)),
+            Err(err) => match err.kind {
+                paper::PaperErrorKind::NotFound => {
+                    ListPaperOrdersResponse::NotFound(error_message(err.message))
+                }
+                _ => ListPaperOrdersResponse::InternalError(error_message(err.message)),
+            },
+        }
+    }
+
+    #[oai(
+        path = "/paper/accounts/:account_id/fills",
+        method = "get",
+        tag = "ApiTags::Paper"
+    )]
+    async fn list_paper_fills(&self, account_id: Path<String>) -> ListPaperFillsResponse {
+        match paper::list_fills(&self.database, &account_id.0).await {
+            Ok(fills) => ListPaperFillsResponse::Ok(Json(fills)),
+            Err(err) => match err.kind {
+                paper::PaperErrorKind::NotFound => {
+                    ListPaperFillsResponse::NotFound(error_message(err.message))
+                }
+                _ => ListPaperFillsResponse::InternalError(error_message(err.message)),
+            },
+        }
+    }
+
+    #[oai(
+        path = "/paper/accounts/:account_id/positions",
+        method = "get",
+        tag = "ApiTags::Paper"
+    )]
+    async fn list_paper_positions(&self, account_id: Path<String>) -> ListPaperPositionsResponse {
+        match paper::list_positions(&self.database, &account_id.0).await {
+            Ok(positions) => ListPaperPositionsResponse::Ok(Json(positions)),
+            Err(err) => match err.kind {
+                paper::PaperErrorKind::NotFound => {
+                    ListPaperPositionsResponse::NotFound(error_message(err.message))
+                }
+                _ => ListPaperPositionsResponse::InternalError(error_message(err.message)),
+            },
+        }
+    }
+
+    #[oai(
+        path = "/paper/accounts/:account_id/events",
+        method = "get",
+        tag = "ApiTags::Paper"
+    )]
+    async fn list_paper_events(&self, account_id: Path<String>) -> ListPaperEventsResponse {
+        match paper::list_events(&self.database, &account_id.0).await {
+            Ok(events) => ListPaperEventsResponse::Ok(Json(events)),
+            Err(err) => match err.kind {
+                paper::PaperErrorKind::NotFound => {
+                    ListPaperEventsResponse::NotFound(error_message(err.message))
+                }
+                _ => ListPaperEventsResponse::InternalError(error_message(err.message)),
+            },
+        }
+    }
+
+    #[oai(
+        path = "/paper/orders/:order_id/cancel",
+        method = "post",
+        tag = "ApiTags::Paper"
+    )]
+    async fn cancel_paper_order(&self, order_id: Path<String>) -> CancelPaperOrderResponse {
+        match paper::cancel_order(&self.database, &order_id.0).await {
+            Ok(order) => CancelPaperOrderResponse::Ok(Json(order)),
+            Err(err) => match err.kind {
+                paper::PaperErrorKind::NotFound => {
+                    CancelPaperOrderResponse::NotFound(error_message(err.message))
+                }
+                paper::PaperErrorKind::Conflict => {
+                    CancelPaperOrderResponse::Conflict(error_message(err.message))
+                }
+                _ => CancelPaperOrderResponse::InternalError(error_message(err.message)),
+            },
+        }
+    }
+
+    #[oai(
+        path = "/strategies/:strategy_id/trading-config",
+        method = "get",
+        tag = "ApiTags::Strategy"
+    )]
+    async fn get_strategy_trading_config(
+        &self,
+        strategy_id: Path<String>,
+    ) -> GetStrategyTradingConfigResponse {
+        match strategy_trading::get_trading_config(&self.database, &strategy_id.0).await {
+            Ok(config) => GetStrategyTradingConfigResponse::Ok(Json(config)),
+            Err(err) => match err.kind {
+                strategy_trading::StrategyTradingErrorKind::NotFound
+                | strategy_trading::StrategyTradingErrorKind::BadRequest => {
+                    GetStrategyTradingConfigResponse::NotFound(error_message(err.message))
+                }
+                strategy_trading::StrategyTradingErrorKind::Conflict
+                | strategy_trading::StrategyTradingErrorKind::Internal => {
+                    GetStrategyTradingConfigResponse::InternalError(error_message(err.message))
+                }
+            },
+        }
+    }
+
+    #[oai(
+        path = "/strategies/:strategy_id/trading-config",
+        method = "put",
+        tag = "ApiTags::Strategy"
+    )]
+    async fn update_strategy_trading_config(
+        &self,
+        strategy_id: Path<String>,
+        request: Json<UpdateStrategyTradingConfigRequest>,
+    ) -> UpdateStrategyTradingConfigResponse {
+        match strategy_trading::update_trading_config(&self.database, &strategy_id.0, request.0)
+            .await
+        {
+            Ok(config) => UpdateStrategyTradingConfigResponse::Ok(Json(config)),
+            Err(err) => match err.kind {
+                strategy_trading::StrategyTradingErrorKind::BadRequest => {
+                    UpdateStrategyTradingConfigResponse::BadRequest(error_message(err.message))
+                }
+                strategy_trading::StrategyTradingErrorKind::NotFound => {
+                    UpdateStrategyTradingConfigResponse::NotFound(error_message(err.message))
+                }
+                strategy_trading::StrategyTradingErrorKind::Conflict => {
+                    UpdateStrategyTradingConfigResponse::Conflict(error_message(err.message))
+                }
+                strategy_trading::StrategyTradingErrorKind::Internal => {
+                    UpdateStrategyTradingConfigResponse::InternalError(error_message(err.message))
+                }
+            },
+        }
+    }
+
+    #[oai(
+        path = "/strategies/:strategy_id/risk-config",
+        method = "get",
+        tag = "ApiTags::Strategy"
+    )]
+    async fn get_strategy_risk_config(
+        &self,
+        strategy_id: Path<String>,
+    ) -> GetStrategyRiskConfigResponse {
+        match strategy_risk::get_risk_config(&self.database, &strategy_id.0).await {
+            Ok(config) => GetStrategyRiskConfigResponse::Ok(Json(config)),
+            Err(err) => match err.kind {
+                strategy_risk::StrategyRiskErrorKind::NotFound => {
+                    GetStrategyRiskConfigResponse::NotFound(error_message(err.message))
+                }
+                strategy_risk::StrategyRiskErrorKind::BadRequest
+                | strategy_risk::StrategyRiskErrorKind::Conflict
+                | strategy_risk::StrategyRiskErrorKind::Internal => {
+                    GetStrategyRiskConfigResponse::InternalError(error_message(err.message))
+                }
+            },
+        }
+    }
+
+    #[oai(
+        path = "/strategies/:strategy_id/risk-config",
+        method = "put",
+        tag = "ApiTags::Strategy"
+    )]
+    async fn update_strategy_risk_config(
+        &self,
+        strategy_id: Path<String>,
+        request: Json<UpdateStrategyRiskConfigRequest>,
+    ) -> UpdateStrategyRiskConfigResponse {
+        match strategy_risk::update_risk_config(&self.database, &strategy_id.0, request.0).await {
+            Ok(config) => UpdateStrategyRiskConfigResponse::Ok(Json(config)),
+            Err(err) => match err.kind {
+                strategy_risk::StrategyRiskErrorKind::BadRequest => {
+                    UpdateStrategyRiskConfigResponse::BadRequest(error_message(err.message))
+                }
+                strategy_risk::StrategyRiskErrorKind::NotFound => {
+                    UpdateStrategyRiskConfigResponse::NotFound(error_message(err.message))
+                }
+                strategy_risk::StrategyRiskErrorKind::Conflict => {
+                    UpdateStrategyRiskConfigResponse::Conflict(error_message(err.message))
+                }
+                strategy_risk::StrategyRiskErrorKind::Internal => {
+                    UpdateStrategyRiskConfigResponse::InternalError(error_message(err.message))
+                }
+            },
+        }
+    }
+
+    #[oai(
+        path = "/strategies/:strategy_id/kill-switch",
+        method = "post",
+        tag = "ApiTags::Strategy"
+    )]
+    async fn trigger_strategy_kill_switch(
+        &self,
+        strategy_id: Path<String>,
+    ) -> StrategyRiskMutationResponse {
+        match strategy_risk::trigger_kill_switch(&self.database, &strategy_id.0).await {
+            Ok(config) => StrategyRiskMutationResponse::Ok(Json(config)),
+            Err(err) => match err.kind {
+                strategy_risk::StrategyRiskErrorKind::NotFound => {
+                    StrategyRiskMutationResponse::NotFound(error_message(err.message))
+                }
+                strategy_risk::StrategyRiskErrorKind::Conflict => {
+                    StrategyRiskMutationResponse::Conflict(error_message(err.message))
+                }
+                strategy_risk::StrategyRiskErrorKind::BadRequest
+                | strategy_risk::StrategyRiskErrorKind::Internal => {
+                    StrategyRiskMutationResponse::InternalError(error_message(err.message))
+                }
+            },
+        }
+    }
+
+    #[oai(
+        path = "/strategies/:strategy_id/resume-trading",
+        method = "post",
+        tag = "ApiTags::Strategy"
+    )]
+    async fn resume_strategy_trading(
+        &self,
+        strategy_id: Path<String>,
+    ) -> StrategyRiskMutationResponse {
+        match strategy_risk::resume_trading(&self.database, &strategy_id.0).await {
+            Ok(config) => StrategyRiskMutationResponse::Ok(Json(config)),
+            Err(err) => match err.kind {
+                strategy_risk::StrategyRiskErrorKind::NotFound => {
+                    StrategyRiskMutationResponse::NotFound(error_message(err.message))
+                }
+                strategy_risk::StrategyRiskErrorKind::Conflict => {
+                    StrategyRiskMutationResponse::Conflict(error_message(err.message))
+                }
+                strategy_risk::StrategyRiskErrorKind::BadRequest
+                | strategy_risk::StrategyRiskErrorKind::Internal => {
+                    StrategyRiskMutationResponse::InternalError(error_message(err.message))
+                }
+            },
+        }
+    }
+
+    #[oai(
+        path = "/strategies/:strategy_id/runtime-state",
+        method = "get",
+        tag = "ApiTags::Strategy"
+    )]
+    async fn get_strategy_runtime_state(
+        &self,
+        strategy_id: Path<String>,
+    ) -> GetStrategyRuntimeStateResponse {
+        match strategy_execution::get_runtime_state(&self.database, &strategy_id.0).await {
+            Ok(state) => GetStrategyRuntimeStateResponse::Ok(Json(state)),
+            Err(message) if message == "strategy not found" => {
+                GetStrategyRuntimeStateResponse::NotFound(error_message(message))
+            }
+            Err(message) => GetStrategyRuntimeStateResponse::InternalError(error_message(message)),
+        }
+    }
+
+    #[oai(
+        path = "/strategies/:strategy_id/signals",
+        method = "get",
+        tag = "ApiTags::Strategy"
+    )]
+    async fn get_strategy_signals(&self, strategy_id: Path<String>) -> GetStrategySignalsResponse {
+        match strategy_execution::get_signals(&self.database, &strategy_id.0).await {
+            Ok(signals) => GetStrategySignalsResponse::Ok(Json(signals)),
+            Err(message) if message == "strategy not found" => {
+                GetStrategySignalsResponse::NotFound(error_message(message))
+            }
+            Err(message) => GetStrategySignalsResponse::InternalError(error_message(message)),
         }
     }
 
@@ -370,6 +914,9 @@ async fn main() -> Result<(), std::io::Error> {
     env_logger::builder()
         .filter_level(log::LevelFilter::Info)
         .init();
+    let _ = FmtSubscriber::builder()
+        .with_max_level(tracing::Level::INFO)
+        .try_init();
 
     let api_bind_address =
         env::var("API_BIND_ADDRESS").unwrap_or_else(|_| "0.0.0.0:3000".to_string());
@@ -394,11 +941,9 @@ async fn main() -> Result<(), std::io::Error> {
     .server(&api_public_base_url);
     let ui = api_service.swagger_ui();
     let cors = Cors::new()
-        .allow_origin(
-            HeaderValue::from_str(&cors_allow_origin).map_err(|err| {
-                std::io::Error::other(format!("invalid CORS_ALLOW_ORIGIN value: {err}"))
-            })?,
-        )
+        .allow_origin(HeaderValue::from_str(&cors_allow_origin).map_err(|err| {
+            std::io::Error::other(format!("invalid CORS_ALLOW_ORIGIN value: {err}"))
+        })?)
         .allow_method(Method::GET)
         .allow_method(Method::POST)
         .allow_method(Method::PUT)

@@ -157,6 +157,8 @@ function toProjectPayload(form: ProjectFormState, existing?: Project): Project {
     name: form.name.trim(),
     description: form.description.trim(),
     strategy: existing?.strategy ?? "",
+    strategy_json: existing?.strategy_json ?? "{}",
+    strategy_status: existing?.strategy_status ?? "draft",
     created_at: existing?.created_at ?? timestamp,
     updated_at: timestamp,
     symbols: form.symbols
@@ -666,7 +668,7 @@ export function Homepage() {
       await syncData();
       setProjectModalOpen(false);
       setProjectForm(emptyProjectForm);
-      setSummaryMessage(`Created project ${payload.name}.`);
+      setSummaryMessage(`Created strategy ${payload.name}.`);
     } catch (error) {
       const message =
         error instanceof Error ? error.message : "Failed to create project.";
@@ -708,7 +710,7 @@ export function Homepage() {
       const deletedName = selectedProject.name;
       await deskApi.deleteProject(selectedProject.id);
       await syncData();
-      setSummaryMessage(`Deleted project ${deletedName}.`);
+      setSummaryMessage(`Deleted strategy ${deletedName}.`);
     } catch (error) {
       const message =
         error instanceof Error ? error.message : "Failed to delete project.";
@@ -940,7 +942,7 @@ export function Homepage() {
                   onClick={() => setProjectModalOpen(true)}
                   className="app-button-primary rounded-full px-4 py-2 text-sm font-medium transition"
                 >
-                  Create project
+                  Create strategy
                 </button>
                 <button
                   type="button"
@@ -960,7 +962,7 @@ export function Homepage() {
 
             <div className="mt-6 grid gap-4 md:grid-cols-2 xl:grid-cols-5">
               <MetricCard
-                label="Projects"
+                label="Strategies"
                 value={String(projects.length)}
                 detail="Tracked strategy workspaces"
               />
@@ -1263,7 +1265,7 @@ export function Homepage() {
 
       <Modal
         open={projectModalOpen}
-        title="Create project"
+        title="Create strategy"
         description="Add a strategy workspace without keeping a full project card on the homepage."
         onClose={() => {
           setProjectModalOpen(false);
@@ -1323,7 +1325,7 @@ export function Homepage() {
             Include pre/post market data
           </label>
           <ModalActions
-            submitLabel="Create project"
+            submitLabel="Create strategy"
             onCancel={() => {
               setProjectModalOpen(false);
               setProjectForm(emptyProjectForm);

@@ -3,6 +3,8 @@ export type Project = {
   name: string;
   description: string;
   strategy: string;
+  strategy_json: string;
+  strategy_status: string;
   created_at: string;
   updated_at: string;
   symbols: string[];
@@ -10,6 +12,8 @@ export type Project = {
   range: string;
   prepost: boolean;
 };
+
+export type TradingMode = "off" | "paper" | "real";
 
 export type Position = {
   symbol: string;
@@ -72,6 +76,212 @@ export type StockIndicatorsResponse = {
   indicators: IndicatorResult[];
   unsupported: string[];
 };
+
+export interface PaperAccount {
+  id: string;
+  name: string;
+  starting_cash: number;
+  cash_balance: number;
+  currency: string;
+  is_active: boolean;
+  created_at: string;
+  updated_at: string;
+}
+
+export interface PaperPosition {
+  id: string;
+  account_id: string;
+  symbol: string;
+  quantity: number;
+  average_price: number;
+  realized_pnl: number;
+  created_at: string;
+  updated_at: string;
+}
+
+export interface PaperOrder {
+  id: string;
+  account_id: string;
+  symbol: string;
+  side: string;
+  order_type: string;
+  quantity: number;
+  requested_price?: number | null;
+  filled_quantity: number;
+  average_fill_price?: number | null;
+  status: string;
+  source: string;
+  strategy_id?: string | null;
+  signal_id?: string | null;
+  created_at: string;
+  updated_at: string;
+}
+
+export interface PaperFill {
+  id: string;
+  account_id: string;
+  order_id: string;
+  symbol: string;
+  side: string;
+  quantity: number;
+  price: number;
+  notional: number;
+  created_at: string;
+}
+
+export interface PaperAccountSummaryResponse {
+  account: PaperAccount;
+  positions: PaperPosition[];
+  open_orders: PaperOrder[];
+  recent_fills: PaperFill[];
+  equity_estimate: number;
+}
+
+export interface PaperOrderExecutionResponse {
+  order: PaperOrder;
+  fill?: PaperFill | null;
+  position?: PaperPosition | null;
+  cash_balance: number;
+}
+
+export interface StrategyTradingConfig {
+  strategy_id: string;
+  trading_mode: TradingMode;
+  paper_account_id: string | null;
+  is_enabled: boolean;
+  last_started_at?: string | null;
+  last_stopped_at?: string | null;
+  created_at?: string | null;
+  updated_at?: string | null;
+}
+
+export interface StrategyRiskConfig {
+  strategy_id: string;
+  max_dollars_per_trade?: number | null;
+  max_quantity_per_trade?: number | null;
+  max_position_value_per_symbol?: number | null;
+  max_total_exposure?: number | null;
+  max_open_positions?: number | null;
+  max_daily_trades?: number | null;
+  max_daily_loss?: number | null;
+  cooldown_seconds: number;
+  allowlist_symbols?: string[] | null;
+  blocklist_symbols?: string[] | null;
+  is_trading_enabled: boolean;
+  kill_switch_enabled: boolean;
+  created_at?: string | null;
+  updated_at?: string | null;
+}
+
+export interface UpdateStrategyRiskConfigRequest {
+  max_dollars_per_trade?: number | null;
+  max_quantity_per_trade?: number | null;
+  max_position_value_per_symbol?: number | null;
+  max_total_exposure?: number | null;
+  max_open_positions?: number | null;
+  max_daily_trades?: number | null;
+  max_daily_loss?: number | null;
+  cooldown_seconds: number;
+  allowlist_symbols?: string[] | null;
+  blocklist_symbols?: string[] | null;
+  is_trading_enabled: boolean;
+  kill_switch_enabled: boolean;
+}
+
+export interface StrategyCondition {
+  indicator: string;
+  period?: number | null;
+  operator: string;
+  value?: number | null;
+  compare_indicator?: string | null;
+  compare_period?: number | null;
+}
+
+export interface StrategyConditionGroup {
+  all?: StrategyCondition[] | null;
+  any?: StrategyCondition[] | null;
+}
+
+export interface StrategyPositionSize {
+  type: string;
+  quantity?: number | null;
+  percent?: number | null;
+}
+
+export interface StrategyRisk {
+  position_size: StrategyPositionSize;
+  max_position_per_symbol?: number | null;
+  cooldown_seconds?: number | null;
+}
+
+export interface StrategyDefinition {
+  version: string;
+  entry: StrategyConditionGroup;
+  exit: StrategyConditionGroup;
+  risk: StrategyRisk;
+}
+
+export interface StrategyRuntimeState {
+  id: string;
+  strategy_id: string;
+  paper_account_id: string;
+  symbol: string;
+  last_evaluated_at?: string | null;
+  last_signal?: string | null;
+  last_signal_at?: string | null;
+  last_order_id?: string | null;
+  position_state: string;
+  cooldown_until?: string | null;
+  created_at: string;
+  updated_at: string;
+}
+
+export interface StrategySignal {
+  id: string;
+  strategy_id: string;
+  paper_account_id: string;
+  symbol: string;
+  signal_type: string;
+  confidence?: number | null;
+  reason: string;
+  market_price?: number | null;
+  source: string;
+  status: string;
+  risk_decision?: string | null;
+  risk_reason?: string | null;
+  order_id?: string | null;
+  created_at: string;
+}
+
+export interface StrategyRuntimeStateListResponse {
+  states: StrategyRuntimeState[];
+}
+
+export interface StrategySignalListResponse {
+  signals: StrategySignal[];
+}
+
+export interface EngineRunnableStrategy {
+  strategy_id: string;
+  name: string;
+  trading_mode: string;
+  paper_account_id: string;
+  symbol_universe: string[];
+  timeframe: string;
+  strategy_definition: StrategyDefinition;
+  risk: StrategyRisk;
+  risk_config: StrategyRiskConfig;
+}
+
+export interface UpdateStrategyTradingConfigRequest {
+  trading_mode: TradingMode;
+  paper_account_id: string | null;
+  is_enabled: boolean;
+}
+
+export interface EngineStrategyConfigResponse {
+  strategies: EngineRunnableStrategy[];
+}
 
 type RequestOptions = {
   method?: "GET" | "POST" | "PUT" | "DELETE";
@@ -263,6 +473,130 @@ export const deskApi = {
       `/portfolios/${encodeURIComponent(portfolioId)}/positions/${encodeURIComponent(symbol)}/${encodeURIComponent(positionOpenedAt)}`,
       {
         method: "DELETE",
+      },
+    );
+  },
+
+  listPaperAccounts() {
+    return request<PaperAccount[]>("/paper/accounts");
+  },
+
+  getPaperAccount(accountId: string) {
+    return request<PaperAccount>(`/paper/accounts/${encodeURIComponent(accountId)}`);
+  },
+
+  getPaperAccountSummary(accountId: string) {
+    return request<PaperAccountSummaryResponse>(
+      `/paper/accounts/${encodeURIComponent(accountId)}/summary`,
+    );
+  },
+
+  createPaperAccount(input: { name: string; starting_cash: number }) {
+    return request<PaperAccount>("/paper/accounts", {
+      method: "POST",
+      body: input,
+    });
+  },
+
+  createPaperOrder(input: {
+    account_id: string;
+    symbol: string;
+    side: "buy" | "sell";
+    order_type: "market";
+    quantity: number;
+    requested_price?: number | null;
+    source?: string;
+    strategy_id?: string | null;
+    signal_id?: string | null;
+  }) {
+    return request<PaperOrderExecutionResponse>("/paper/orders", {
+      method: "POST",
+      body: input,
+    });
+  },
+
+  listPaperPositions(accountId: string) {
+    return request<PaperPosition[]>(
+      `/paper/accounts/${encodeURIComponent(accountId)}/positions`,
+    );
+  },
+
+  listPaperOrders(accountId: string) {
+    return request<PaperOrder[]>(
+      `/paper/accounts/${encodeURIComponent(accountId)}/orders`,
+    );
+  },
+
+  listPaperFills(accountId: string) {
+    return request<PaperFill[]>(
+      `/paper/accounts/${encodeURIComponent(accountId)}/fills`,
+    );
+  },
+
+  getStrategyTradingConfig(strategyId: string) {
+    return request<StrategyTradingConfig>(
+      `/strategies/${encodeURIComponent(strategyId)}/trading-config`,
+    );
+  },
+
+  updateStrategyTradingConfig(
+    strategyId: string,
+    input: UpdateStrategyTradingConfigRequest,
+  ) {
+    return request<StrategyTradingConfig>(
+      `/strategies/${encodeURIComponent(strategyId)}/trading-config`,
+      {
+        method: "PUT",
+        body: input,
+      },
+    );
+  },
+
+  getStrategyRuntimeState(strategyId: string) {
+    return request<StrategyRuntimeStateListResponse>(
+      `/strategies/${encodeURIComponent(strategyId)}/runtime-state`,
+    );
+  },
+
+  getStrategySignals(strategyId: string) {
+    return request<StrategySignalListResponse>(
+      `/strategies/${encodeURIComponent(strategyId)}/signals`,
+    );
+  },
+
+  getStrategyRiskConfig(strategyId: string) {
+    return request<StrategyRiskConfig>(
+      `/strategies/${encodeURIComponent(strategyId)}/risk-config`,
+    );
+  },
+
+  updateStrategyRiskConfig(
+    strategyId: string,
+    input: UpdateStrategyRiskConfigRequest,
+  ) {
+    return request<StrategyRiskConfig>(
+      `/strategies/${encodeURIComponent(strategyId)}/risk-config`,
+      {
+        method: "PUT",
+        body: input,
+      },
+    );
+  },
+
+  triggerStrategyKillSwitch(strategyId: string) {
+    return request<StrategyRiskConfig>(
+      `/strategies/${encodeURIComponent(strategyId)}/kill-switch`,
+      {
+        method: "POST",
+      },
+    );
+  },
+
+  resumeStrategyTrading(strategyId: string) {
+    return request<StrategyRiskConfig>(
+      `/strategies/${encodeURIComponent(strategyId)}/resume-trading`,
+      {
+        method: "POST",
       },
     );
   },

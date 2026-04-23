@@ -88,6 +88,7 @@ The containerized stack starts:
 - PostgreSQL: `localhost:5432`
 
 The API allows browser requests from the frontend origin configured by `CORS_ALLOW_ORIGIN`.
+The frontend container runs the Vite dev server with a bind mount, so code changes under `frontend/` should hot reload without rebuilding the container.
 
 ### Start the backend
 

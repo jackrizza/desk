@@ -7,6 +7,8 @@ pub struct Project {
     pub name: String,
     pub description: String,
     pub strategy: String,
+    pub strategy_json: String,
+    pub strategy_status: String,
     pub created_at: String,
     pub updated_at: String,
     pub symbols: Vec<String>,

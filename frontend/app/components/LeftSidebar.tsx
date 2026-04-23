@@ -48,6 +48,8 @@ function toProjectPayload(form: ProjectFormState): Project {
         name: form.name.trim(),
         description: form.description.trim(),
         strategy: "",
+        strategy_json: "{}",
+        strategy_status: "draft",
         created_at: timestamp,
         updated_at: timestamp,
         symbols: form.symbols
@@ -180,7 +182,7 @@ export function LeftSidebar({
                             onClick={() => setProjectsOpen((o) => !o)}
                             className="app-nav-link flex w-full items-center justify-between rounded-md px-3 py-2"
                         >
-                            <span>Projects</span>
+                            <span>Strategies</span>
                             <svg
                                 className={`w-4 h-4 transition-transform duration-200 ${projectsOpen ? "rotate-180" : ""}`}
                                 fill="none" stroke="currentColor" viewBox="0 0 24 24"
@@ -198,13 +200,13 @@ export function LeftSidebar({
                                     }}
                                     className="app-nav-link app-text-muted rounded-md px-3 py-2 text-left"
                                 >
-                                    Create project
+                                    Create strategy
                                 </button>
                                 {projects.map((project) => (
                                     <button
                                         key={project.id}
                                         type="button"
-                                        onClick={() => navigate(`/projects/${encodeURIComponent(project.id)}`)}
+                                        onClick={() => navigate(`/strategies/${encodeURIComponent(project.id)}`)}
                                         className="app-nav-link app-text-muted rounded-md px-3 py-2 text-left"
                                         title={project.name}
                                     >
@@ -213,7 +215,7 @@ export function LeftSidebar({
                                 ))}
                                 {projects.length === 0 ? (
                                     <div className="app-text-muted rounded-md px-3 py-2 text-sm">
-                                        No projects yet
+                                        No strategies yet
                                     </div>
                                 ) : null}
                             </div>
@@ -322,8 +324,8 @@ export function LeftSidebar({
                     <div className="app-surface w-full max-w-xl rounded-3xl p-5 shadow-lg">
                         <div className="mb-4 flex items-center justify-between gap-3">
                             <div>
-                                <p className="app-text-muted text-xs uppercase tracking-[0.2em]">Projects</p>
-                                <h2 className="mt-2 text-xl font-semibold">Create project</h2>
+                                <p className="app-text-muted text-xs uppercase tracking-[0.2em]">Strategies</p>
+                                <h2 className="mt-2 text-xl font-semibold">Create strategy</h2>
                             </div>
                             <button
                                 type="button"
@@ -453,7 +455,7 @@ export function LeftSidebar({
                                     disabled={projectPending}
                                     className="app-button-primary rounded-full px-4 py-2 text-sm font-medium disabled:cursor-not-allowed disabled:opacity-60"
                                 >
-                                    {projectPending ? "Creating..." : "Create project"}
+                                    {projectPending ? "Creating..." : "Create strategy"}
                                 </button>
                             </div>
                         </form>

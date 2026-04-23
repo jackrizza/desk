@@ -45,20 +45,45 @@ services:
     ports:
       - "${OPENAPI_PORT:-3000}:3000"
 
+  engine:
+    build:
+      context: .
+      dockerfile: apps/engine/Dockerfile
+    container_name: desk-engine
+    restart: unless-stopped
+    depends_on:
+      openapi:
+        condition: service_healthy
+    environment:
+      ENGINE_NAME: ${ENGINE_NAME:-engine-1}
+      OPENAPI_BASE_URL: ${OPENAPI_BASE_URL:-http://openapi:3000/api}
+      ENGINE_POLL_INTERVAL_SECONDS: ${ENGINE_POLL_INTERVAL_SECONDS:-30}
+      ENGINE_ENABLE_TEST_PAPER_ORDERS: ${ENGINE_ENABLE_TEST_PAPER_ORDERS:-false}
+      RUST_LOG: ${RUST_LOG:-info}
+    volumes:
+      - openapi_cache:/app/cache_data
+
   frontend:
     build:
       context: ./frontend
-      dockerfile: Dockerfile
-      args:
-        VITE_API_BASE_URL: ${FRONTEND_VITE_API_BASE_URL:-http://localhost:3000/api}
+      dockerfile: Dockerfile.dev
     container_name: desk-frontend
     restart: unless-stopped
     depends_on:
       openapi:
         condition: service_healthy
+      engine:
+        condition: service_started
+    environment:
+      VITE_DEV_PROXY_TARGET: http://openapi:3000
+      CHOKIDAR_USEPOLLING: "true"
+    volumes:
+      - ./frontend:/app
+      - frontend_node_modules:/app/node_modules
     ports:
       - "${FRONTEND_PORT:-5173}:5173"
 
 volumes:
   postgres_data:
   openapi_cache:
+  frontend_node_modules:

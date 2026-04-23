@@ -76,7 +76,7 @@ function createWelcomeMessage(page: ChatContext["page"]) {
 
 function getWelcomeMessage(page: ChatContext["page"]) {
   return page === "home"
-    ? "Portfolio assistant is live. Ask about NAV, gain, portfolio scope, projects, or positions on this dashboard."
+    ? "Portfolio assistant is live. Ask about NAV, gain, portfolio scope, strategies, or positions on this dashboard."
     : page === "market"
       ? "Market assistant is live. Ask about the active symbol, range, interval, last close, or chart state on this screen."
       : "Strategy assistant is live. Describe the trading pattern you want and I will help turn it into a rules-based idea for this project.";
@@ -115,8 +115,8 @@ function buildHomeReply(input: string, context: Extract<ChatContext, { page: "ho
 
   if (normalized.includes("project")) {
     return context.selectedProjectName
-      ? `The selected project is ${context.selectedProjectName}. There are ${context.projectCount} tracked projects overall.`
-      : `There are ${context.projectCount} tracked projects. No project is actively selected right now.`;
+      ? `The selected strategy is ${context.selectedProjectName}. There are ${context.projectCount} tracked strategies overall.`
+      : `There are ${context.projectCount} tracked strategies. No strategy is actively selected right now.`;
   }
 
   if (normalized.includes("position")) {
@@ -135,7 +135,7 @@ function buildHomeReply(input: string, context: Extract<ChatContext, { page: "ho
     return `There are ${context.totalPositions} positions in scope, ${context.openPositions} open. Top rows: ${preview}.`;
   }
 
-  return `I can summarize the current dashboard state, including scoped NAV (${formatCurrency(context.nav)}), gain (${formatSignedPercent(context.gainPercentage)}), projects, portfolio scope, and positions. For true open-ended ChatGPT reasoning, the next step would be wiring this panel to a real chat backend endpoint.`;
+  return `I can summarize the current dashboard state, including scoped NAV (${formatCurrency(context.nav)}), gain (${formatSignedPercent(context.gainPercentage)}), strategies, portfolio scope, and positions. For true open-ended ChatGPT reasoning, the next step would be wiring this panel to a real chat backend endpoint.`;
 }
 
 function buildMarketReply(input: string, context: Extract<ChatContext, { page: "market" }>) {

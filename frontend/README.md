@@ -42,6 +42,14 @@ Create a production build:
 npm run build
 ```
 
+## Strategies Live Tab
+
+The Strategies Live tab now includes a three-state execution selector:
+
+- `Off` keeps the strategy inactive.
+- `Paper` connects the UI to the `/paper` API for paper accounts, summary data, and optional test paper orders.
+- `Real` is intentionally visible but disabled until live trading is implemented.
+
 ## Deployment
 
 ### Docker Deployment
