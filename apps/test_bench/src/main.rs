@@ -7,7 +7,7 @@ async fn main() {
         .filter_level(log::LevelFilter::Info)
         .init();
 
-    let mut cache: cache::Cache = cache::Cache::new("cache.json".to_string());
+    let cache: cache::Cache = cache::Cache::new("cache.json".to_string());
 
     let symbol = "AAPL".to_string();
     let range = "1mo".to_string();

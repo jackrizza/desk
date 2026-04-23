@@ -3,7 +3,13 @@ use models::{
     portfolio::{Portfolio, Position},
     projects::Project,
 };
-use poem::{Route, listener::TcpListener};
+use poem::{
+    EndpointExt,
+    Route,
+    http::{HeaderValue, Method},
+    listener::TcpListener,
+    middleware::Cors,
+};
 use poem_openapi::{
     OpenApi, OpenApiService,
     param::Path,
@@ -372,6 +378,8 @@ async fn main() -> Result<(), std::io::Error> {
     let cache_dir = env::var("CACHE_DIR").unwrap_or_else(|_| "cache_data".to_string());
     let database_url = env::var("DATABASE_URL")
         .unwrap_or_else(|_| "postgres://desk:desk@localhost:5432/desk".to_string());
+    let cors_allow_origin =
+        env::var("CORS_ALLOW_ORIGIN").unwrap_or_else(|_| "http://localhost:5173".to_string());
 
     let api_service = OpenApiService::new(
         Api {
@@ -385,7 +393,22 @@ async fn main() -> Result<(), std::io::Error> {
     )
     .server(&api_public_base_url);
     let ui = api_service.swagger_ui();
-    let app = Route::new().nest("/api", api_service).nest("/", ui);
+    let cors = Cors::new()
+        .allow_origin(
+            HeaderValue::from_str(&cors_allow_origin).map_err(|err| {
+                std::io::Error::other(format!("invalid CORS_ALLOW_ORIGIN value: {err}"))
+            })?,
+        )
+        .allow_method(Method::GET)
+        .allow_method(Method::POST)
+        .allow_method(Method::PUT)
+        .allow_method(Method::DELETE)
+        .allow_method(Method::OPTIONS)
+        .allow_credentials(false);
+    let app = Route::new()
+        .nest("/api", api_service)
+        .nest("/", ui)
+        .with(cors);
 
     info!("Starting server on http://{api_bind_address}");
     poem::Server::new(TcpListener::bind(api_bind_address))

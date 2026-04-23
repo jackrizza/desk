@@ -87,6 +87,8 @@ The containerized stack starts:
 - API + Swagger UI: `http://localhost:3000`
 - PostgreSQL: `localhost:5432`
 
+The API allows browser requests from the frontend origin configured by `CORS_ALLOW_ORIGIN`.
+
 ### Start the backend
 
 From the repository root:

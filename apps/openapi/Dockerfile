@@ -1,19 +1,22 @@
-FROM rust:1.86-slim-bookworm AS builder
+FROM rust:1.88-slim-bookworm AS chef
+
+RUN apt-get update \
+    && apt-get install -y --no-install-recommends protobuf-compiler pkg-config libssl-dev \
+    && rm -rf /var/lib/apt/lists/*
+
+RUN cargo install cargo-chef --locked
 
 WORKDIR /app
-COPY Cargo.toml Cargo.lock ./
-COPY apps/openapi/Cargo.toml apps/openapi/Cargo.toml
-COPY crates/cache/Cargo.toml crates/cache/Cargo.toml
-COPY crates/database/Cargo.toml crates/database/Cargo.toml
-COPY crates/models/Cargo.toml crates/models/Cargo.toml
-COPY crates/stock_data/Cargo.toml crates/stock_data/Cargo.toml
-RUN mkdir -p apps/openapi/src crates/cache/src crates/database/src crates/models/src crates/stock_data/src
-RUN echo "fn main() {}" > apps/openapi/src/main.rs
-RUN echo "" > crates/cache/src/lib.rs
-RUN echo "" > crates/database/src/lib.rs
-RUN echo "" > crates/models/src/lib.rs
-RUN echo "" > crates/stock_data/src/lib.rs
-RUN cargo build -p openapi --release || true
+
+FROM chef AS planner
+
+COPY . .
+RUN cargo chef prepare --recipe-path recipe.json
+
+FROM chef AS builder
+
+COPY --from=planner /app/recipe.json recipe.json
+RUN cargo chef cook --release --recipe-path recipe.json
 
 COPY . .
 RUN cargo build -p openapi --release
