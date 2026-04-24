@@ -161,7 +161,7 @@ mod tests {
         StrategyDefinition, StrategyPositionSize, StrategyRisk, StrategyRiskConfig,
         StrategyRuntimeState, StrategySignal,
     };
-    use models::paper::{PaperAccount, PaperPosition};
+    use models::paper::{PaperAccount, PaperPositionSummary};
 
     fn strategy() -> EngineRunnableStrategy {
         EngineRunnableStrategy {
@@ -213,12 +213,17 @@ mod tests {
                 created_at: chrono::Utc::now().to_rfc3339(),
                 updated_at: chrono::Utc::now().to_rfc3339(),
             },
-            positions: vec![PaperPosition {
+            positions: vec![PaperPositionSummary {
                 id: "position-1".to_string(),
                 account_id: "account-1".to_string(),
                 symbol: "MSFT".to_string(),
                 quantity: 1.0,
                 average_price: 100.0,
+                current_price: Some(100.0),
+                market_value: Some(100.0),
+                cost_basis: 100.0,
+                unrealized_gain: 0.0,
+                unrealized_gain_percent: 0.0,
                 realized_pnl: 0.0,
                 created_at: chrono::Utc::now().to_rfc3339(),
                 updated_at: chrono::Utc::now().to_rfc3339(),
@@ -226,6 +231,10 @@ mod tests {
             open_orders: vec![],
             recent_fills: vec![],
             equity_estimate: 9600.0,
+            total_cost_basis: 100.0,
+            total_market_value: 100.0,
+            total_unrealized_gain: 0.0,
+            total_unrealized_gain_percent: 0.0,
         }
     }
 

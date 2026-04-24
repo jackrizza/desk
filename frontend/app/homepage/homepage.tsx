@@ -1,11 +1,26 @@
 import { useEffect, useMemo, useRef, useState } from "react";
 import { useNavigate, useSearchParams } from "react-router";
+import { EmptyState, ErrorInline, LoadingInline, RefreshBadge } from "../components/AppFeedback";
 import { ChatPanel } from "../components/ChatPanel";
 import { LeftSidebar } from "../components/LeftSidebar";
+import { SignedValue } from "../components/SignedValue";
 import { Topbar } from "../components/Topbar";
-import { deskApi, type Portfolio, type Position, type Project } from "../lib/api";
+import {
+  deskApi,
+  type Portfolio,
+  type Position,
+  type Project,
+  type TradingAccountKind,
+} from "../lib/api";
+import { usePaperAccountSummary } from "../hooks/usePaperAccountSummary";
+import { usePortfolioAccounts } from "../hooks/usePortfolioAccounts";
 import { useDeskChat } from "../lib/chat";
+import {
+  getPaperPositionMetrics,
+  getPaperSummaryMetrics,
+} from "../lib/paper-summary";
 import { CHAT_OPEN_STORAGE_KEY, usePersistentBoolean } from "../lib/ui-state";
+import { useAppState } from "../state/useAppState";
 
 type ProjectFormState = {
   id: string;
@@ -41,6 +56,8 @@ type ClosePositionFormState = {
   positionClosedAt: string;
   positionClosedPrice: string;
 };
+
+const MANUAL_ACCOUNT_ID = "manual";
 
 const emptyProjectForm: ProjectFormState = {
   id: "",
@@ -87,6 +104,13 @@ function formatCurrency(value: number) {
     currency: "USD",
     maximumFractionDigits: 2,
   }).format(value);
+}
+
+function formatSignedCurrency(value: number) {
+  const safeValue = Number.isFinite(value) ? value : 0;
+  const absoluteValue = Math.abs(safeValue);
+  const prefix = safeValue > 0 ? "+" : safeValue < 0 ? "-" : "";
+  return `${prefix}${formatCurrency(absoluteValue)}`;
 }
 
 function getLatestClose(positionHistory: {
@@ -149,6 +173,12 @@ function serialize(value: unknown) {
   return JSON.stringify(value);
 }
 
+function formatPercent(value: number) {
+  const safeValue = Number.isFinite(value) ? value : 0;
+  const prefix = safeValue > 0 ? "+" : "";
+  return `${prefix}${safeValue.toFixed(2)}%`;
+}
+
 function toProjectPayload(form: ProjectFormState, existing?: Project): Project {
   const timestamp = makeTimestamp();
 
@@ -201,6 +231,18 @@ function toPositionPayload(form: PositionFormState): Position {
 }
 
 export function Homepage() {
+  const { uiState, setSelectedPaperAccountId, setSelectedPortfolioAccount } =
+    useAppState();
+  const { accountOptions, paperAccountsQuery, liveAccountsQuery } =
+    usePortfolioAccounts();
+  const selectedTradingAccount = uiState.selectedPortfolioAccount ?? {
+    kind: "manual" as const,
+    id: MANUAL_ACCOUNT_ID,
+  };
+  const selectedPaperAccountId = selectedTradingAccount.kind === "paper"
+    ? selectedTradingAccount.id
+    : null;
+  const paperSummaryQuery = usePaperAccountSummary(selectedPaperAccountId);
   const [sidebarOpen, setSidebarOpen] = useState(true);
   const [helloMessage, setHelloMessage] = useState("Connecting to Desk API...");
   const [projects, setProjects] = useState<Project[]>([]);
@@ -227,6 +269,7 @@ export function Homepage() {
   const [allPortfolioNav, setAllPortfolioNav] = useState(0);
   const [navCoverage, setNavCoverage] = useState({ priced: 0, total: 0 });
   const [navLoading, setNavLoading] = useState(false);
+  const [allPortfolioGainAmount, setAllPortfolioGainAmount] = useState(0);
   const [allPortfolioGainPercentage, setAllPortfolioGainPercentage] = useState(0);
   const [projectModalOpen, setProjectModalOpen] = useState(false);
   const [portfolioModalOpen, setPortfolioModalOpen] = useState(false);
@@ -339,6 +382,29 @@ export function Homepage() {
     }
     return `${selectedPortfolioNames.slice(0, 2).join(", ")} +${selectedPortfolioNames.length - 2}`;
   }, [portfolios.length, selectedPortfolioIds.length, selectedPortfolioNames]);
+  const selectedAccountOption = useMemo(
+    () =>
+      accountOptions.find(
+        (option) =>
+          option.kind === selectedTradingAccount.kind
+          && option.id === selectedTradingAccount.id,
+      ) ?? null,
+    [accountOptions, selectedTradingAccount],
+  );
+  const isManualAccountSelected = selectedTradingAccount.kind === "manual";
+  const isLiveAccountSelected = selectedTradingAccount.kind === "live";
+  const selectedPaperSummary = paperSummaryQuery.data ?? null;
+  const selectedPaperAccount = selectedPaperSummary?.account ?? null;
+  const selectedPaperPositions = selectedPaperSummary?.positions ?? [];
+  const paperEquityEstimate = selectedPaperSummary?.equity_estimate ?? 0;
+  const paperStartingCash = selectedPaperAccount?.starting_cash ?? 0;
+  const paperTotalReturn = paperEquityEstimate - paperStartingCash;
+  const paperTotalReturnPercent = paperStartingCash > 0
+    ? (paperTotalReturn / paperStartingCash) * 100
+    : 0;
+  const selectedPaperMetrics = selectedPaperSummary
+    ? getPaperSummaryMetrics(selectedPaperSummary)
+    : null;
   const chat = useDeskChat({
     page: "home",
     projectCount: projects.length,
@@ -369,6 +435,42 @@ export function Homepage() {
   useEffect(() => {
     selectedPortfolioIdRef.current = selectedPortfolioId;
   }, [selectedPortfolioId]);
+
+  useEffect(() => {
+    if (!accountOptions.length) {
+      return;
+    }
+
+    const currentExists = accountOptions.some(
+      (option) =>
+        option.kind === selectedTradingAccount.kind
+        && option.id === selectedTradingAccount.id,
+    );
+    if (currentExists) {
+      return;
+    }
+
+    const fallbackOption = accountOptions.find((option) => option.kind === "manual")
+      ?? accountOptions.find((option) => option.kind === "paper")
+      ?? accountOptions[0];
+    setSelectedPortfolioAccount(
+      fallbackOption
+        ? { kind: fallbackOption.kind, id: fallbackOption.id }
+        : { kind: "manual", id: MANUAL_ACCOUNT_ID },
+    );
+  }, [accountOptions, selectedTradingAccount, setSelectedPortfolioAccount]);
+
+  useEffect(() => {
+    const nextPaperAccountId =
+      selectedTradingAccount.kind === "paper" ? selectedTradingAccount.id : null;
+    if (uiState.selectedPaperAccountId !== nextPaperAccountId) {
+      setSelectedPaperAccountId(nextPaperAccountId);
+    }
+  }, [
+    selectedTradingAccount,
+    setSelectedPaperAccountId,
+    uiState.selectedPaperAccountId,
+  ]);
 
   async function syncData(options?: { showLoading?: boolean; showSummary?: boolean }) {
     if (syncInFlightRef.current) {
@@ -553,6 +655,7 @@ export function Homepage() {
     async function refreshAllPortfolioNav() {
       if (!allPortfolioPositions.length) {
         setAllPortfolioNav(0);
+        setAllPortfolioGainAmount(0);
         setAllPortfolioGainPercentage(0);
         setNavCoverage({ priced: 0, total: 0 });
         setNavLoading(false);
@@ -617,6 +720,7 @@ export function Homepage() {
         }
 
         setAllPortfolioNav(nextNav);
+        setAllPortfolioGainAmount(totalCurrentValue - totalCostBasis);
         setAllPortfolioGainPercentage(
           totalCostBasis > 0
             ? ((totalCurrentValue - totalCostBasis) / totalCostBasis) * 100
@@ -860,80 +964,155 @@ export function Homepage() {
                   {helloMessage} This screen is now calling the Poem OpenAPI server
                   for project, portfolio, position, and quote workflows.
                 </p>
-                <div className="mt-4">
-                  <details className="app-surface-muted w-full rounded-2xl px-4 py-3 md:w-[30rem]">
-                    <summary className="flex cursor-pointer list-none items-center justify-between gap-3">
-                      <div>
-                        <p className="app-text-muted text-xs uppercase tracking-[0.18em]">
-                          Portfolio Scope
-                        </p>
-                        <p className="mt-1 text-sm font-medium">
-                          {portfolioSelectionLabel}
-                        </p>
-                      </div>
-                      <span className="app-text-muted text-sm">
-                        {selectedPortfolioIds.length}/{portfolios.length || 0}
-                      </span>
-                    </summary>
-                    <div className="mt-4 space-y-3">
-                      <div className="flex flex-wrap gap-2">
-                        <button
-                          type="button"
-                          onClick={() =>
-                            {
+                <div className="mt-4 flex max-w-xl flex-col gap-4">
+                  <label className="block">
+                    <span className="mb-2 block text-sm font-medium">
+                      Account
+                    </span>
+                    <select
+                      value={`${selectedTradingAccount.kind}:${selectedTradingAccount.id}`}
+                      onChange={(event) => {
+                        const [kind, id] = event.target.value.split(":", 2) as [
+                          TradingAccountKind,
+                          string,
+                        ];
+                        setSelectedPortfolioAccount({ kind, id });
+                        setSelectedPaperAccountId(kind === "paper" ? id : null);
+                      }}
+                      className="app-input w-full rounded-2xl px-4 py-3 text-sm transition"
+                    >
+                      <optgroup label="Manual Portfolio">
+                        <option value={`manual:${MANUAL_ACCOUNT_ID}`}>
+                          Manual Portfolio
+                        </option>
+                      </optgroup>
+                      <optgroup label="Paper Accounts">
+                        {accountOptions
+                          .filter((option) => option.kind === "paper")
+                          .map((option) => (
+                            <option
+                              key={`${option.kind}:${option.id}`}
+                              value={`${option.kind}:${option.id}`}
+                            >
+                              {option.label}
+                              {!option.is_active ? " (inactive)" : ""}
+                            </option>
+                          ))}
+                        {!accountOptions.some((option) => option.kind === "paper") && (
+                          <option value="" disabled>
+                            {paperAccountsQuery.isLoading
+                              ? "Loading paper accounts..."
+                              : "No paper accounts available"}
+                          </option>
+                        )}
+                      </optgroup>
+                      <optgroup label="Live Accounts">
+                        {accountOptions
+                          .filter((option) => option.kind === "live")
+                          .map((option) => (
+                            <option
+                              key={`${option.kind}:${option.id}`}
+                              value={`${option.kind}:${option.id}`}
+                            >
+                              {option.label}
+                              {!option.is_active ? " (inactive)" : ""}
+                            </option>
+                          ))}
+                        {!accountOptions.some((option) => option.kind === "live") && (
+                          <option value="" disabled>
+                            {liveAccountsQuery.isLoading
+                              ? "Loading live accounts..."
+                              : "No live accounts connected"}
+                          </option>
+                        )}
+                      </optgroup>
+                    </select>
+                  </label>
+
+                  {selectedAccountOption && (
+                    <div className="app-surface-muted rounded-2xl px-4 py-3 text-sm">
+                      <p className="app-text-muted text-xs uppercase tracking-[0.18em]">
+                        Active Account
+                      </p>
+                      <p className="mt-2 font-medium">
+                        {selectedAccountOption.label}
+                      </p>
+                    </div>
+                  )}
+
+                  {isManualAccountSelected && (
+                    <details className="app-surface-muted w-full rounded-2xl px-4 py-3">
+                      <summary className="flex cursor-pointer list-none items-center justify-between gap-3">
+                        <div>
+                          <p className="app-text-muted text-xs uppercase tracking-[0.18em]">
+                            Portfolio Scope
+                          </p>
+                          <p className="mt-1 text-sm font-medium">
+                            {portfolioSelectionLabel}
+                          </p>
+                        </div>
+                        <span className="app-text-muted text-sm">
+                          {selectedPortfolioIds.length}/{portfolios.length || 0}
+                        </span>
+                      </summary>
+                      <div className="mt-4 space-y-3">
+                        <div className="flex flex-wrap gap-2">
+                          <button
+                            type="button"
+                            onClick={() => {
                               portfolioSelectionInitializedRef.current = true;
                               setSelectedPortfolioIds(
                                 portfolios.map((portfolio) => portfolio.id),
                               );
-                            }
-                          }
-                          className="app-button-secondary rounded-full px-3 py-1.5 text-xs font-medium transition"
-                        >
-                          Select all
-                        </button>
-                        <button
-                          type="button"
-                          onClick={() => {
-                            portfolioSelectionInitializedRef.current = true;
-                            setSelectedPortfolioIds([]);
-                          }}
-                          className="app-button-secondary rounded-full px-3 py-1.5 text-xs font-medium transition"
-                        >
-                          Clear
-                        </button>
+                            }}
+                            className="app-button-secondary rounded-full px-3 py-1.5 text-xs font-medium transition"
+                          >
+                            Select all
+                          </button>
+                          <button
+                            type="button"
+                            onClick={() => {
+                              portfolioSelectionInitializedRef.current = true;
+                              setSelectedPortfolioIds([]);
+                            }}
+                            className="app-button-secondary rounded-full px-3 py-1.5 text-xs font-medium transition"
+                          >
+                            Clear
+                          </button>
+                        </div>
+                        <div className="max-h-52 space-y-2 overflow-auto pr-1">
+                          {portfolios.map((portfolio) => {
+                            const checked = selectedPortfolioIds.includes(portfolio.id);
+                            return (
+                              <label
+                                key={portfolio.id}
+                                className="app-surface flex items-center gap-3 rounded-xl px-3 py-2 text-sm"
+                              >
+                                <input
+                                  type="checkbox"
+                                  checked={checked}
+                                  onChange={(event) => {
+                                    portfolioSelectionInitializedRef.current = true;
+                                    setSelectedPortfolioIds((current) =>
+                                      event.target.checked
+                                        ? [...current, portfolio.id]
+                                        : current.filter((id) => id !== portfolio.id),
+                                    );
+                                  }}
+                                />
+                                <span>{portfolio.name}</span>
+                              </label>
+                            );
+                          })}
+                          {!portfolios.length && (
+                            <p className="app-text-muted text-sm">
+                              Create a portfolio to start filtering manual ops.
+                            </p>
+                          )}
+                        </div>
                       </div>
-                      <div className="max-h-52 space-y-2 overflow-auto pr-1">
-                        {portfolios.map((portfolio) => {
-                          const checked = selectedPortfolioIds.includes(portfolio.id);
-                          return (
-                            <label
-                              key={portfolio.id}
-                              className="app-surface flex items-center gap-3 rounded-xl px-3 py-2 text-sm"
-                            >
-                              <input
-                                type="checkbox"
-                                checked={checked}
-                                onChange={(event) => {
-                                  portfolioSelectionInitializedRef.current = true;
-                                  setSelectedPortfolioIds((current) =>
-                                    event.target.checked
-                                      ? [...current, portfolio.id]
-                                      : current.filter((id) => id !== portfolio.id),
-                                  );
-                                }}
-                              />
-                              <span>{portfolio.name}</span>
-                            </label>
-                          );
-                        })}
-                        {!portfolios.length && (
-                          <p className="app-text-muted text-sm">
-                            Create a portfolio to start filtering manual ops.
-                          </p>
-                        )}
-                      </div>
-                    </div>
-                  </details>
+                    </details>
+                  )}
                 </div>
               </div>
               <div className="flex flex-wrap gap-3">
@@ -989,11 +1168,19 @@ export function Homepage() {
               />
               <MetricCard
                 label="All Portfolio Gain"
-                value={`${allPortfolioGainPercentage >= 0 ? "+" : ""}${allPortfolioGainPercentage.toFixed(2)}%`}
+                value={
+                  <SignedValue value={allPortfolioGainAmount}>
+                    {formatSignedCurrency(allPortfolioGainAmount)}
+                  </SignedValue>
+                }
                 detail={
-                  navCoverage.total
-                    ? "Aggregate realized and unrealized performance versus cost basis"
-                    : "No positions available for gain calculation"
+                  navCoverage.total ? (
+                    <SignedValue value={allPortfolioGainPercentage}>
+                      {formatPercent(allPortfolioGainPercentage)} versus cost basis
+                    </SignedValue>
+                  ) : (
+                    "No positions available for gain calculation"
+                  )
                 }
               />
             </div>
@@ -1007,14 +1194,29 @@ export function Homepage() {
                 {errorMessage || summaryMessage}
               </div>
             )}
+
+            {(paperAccountsQuery.error || liveAccountsQuery.error) && (
+              <div className="mt-4">
+                <ErrorInline
+                  message={
+                    paperAccountsQuery.error instanceof Error
+                      ? paperAccountsQuery.error.message
+                      : liveAccountsQuery.error instanceof Error
+                        ? liveAccountsQuery.error.message
+                        : "Failed to refresh account options."
+                  }
+                />
+              </div>
+            )}
           </article>
         </section>
 
-        <Panel
-          id="positions"
-          title="Positions"
-          subtitle="Calling nested /portfolios/:portfolio_id/positions routes for list, detail, create, update, and delete."
-        >
+        {isManualAccountSelected && (
+          <Panel
+            id="positions"
+            title="Positions"
+            subtitle="Calling nested /portfolios/:portfolio_id/positions routes for list, detail, create, update, and delete."
+          >
           <div className="grid gap-6 xl:grid-cols-[1.15fr_0.85fr]">
             <div className="space-y-6">
               <div className="app-surface-muted rounded-2xl p-4">
@@ -1260,7 +1462,215 @@ export function Homepage() {
               </div>
             </form>
           </div>
-        </Panel>
+          </Panel>
+        )}
+
+        {selectedTradingAccount.kind === "paper" && (
+          <Panel
+            id="paper-account"
+            title="Paper Account Portfolio"
+            subtitle="Display-only paper trading summary backed by /paper/accounts endpoints."
+          >
+            <div className="space-y-6">
+              {paperSummaryQuery.isLoading && (
+                <LoadingInline message="Loading paper account summary..." />
+              )}
+
+              {paperSummaryQuery.error && (
+                <ErrorInline
+                  message={
+                    paperSummaryQuery.error instanceof Error
+                      ? paperSummaryQuery.error.message
+                      : "Failed to load paper account summary."
+                  }
+                />
+              )}
+
+              {!paperSummaryQuery.isLoading && !paperSummaryQuery.error && !selectedPaperSummary && (
+                <EmptyState message="Select a paper account to view its portfolio summary." />
+              )}
+
+              {selectedPaperSummary && selectedPaperAccount && (
+                <>
+                  <div className="flex justify-end">
+                    <RefreshBadge
+                      refreshing={paperSummaryQuery.isFetching}
+                      updatedLabel="Paper summary synced"
+                    />
+                  </div>
+                  <div className="grid gap-4 md:grid-cols-2 xl:grid-cols-6">
+                    <MetricCard
+                      label="Account Name"
+                      value={selectedPaperAccount.name}
+                      detail={selectedPaperAccount.is_active ? "Active paper account" : "Inactive paper account"}
+                    />
+                    <MetricCard
+                      label="Cash Balance"
+                      value={formatCurrency(selectedPaperAccount.cash_balance)}
+                      detail="Available paper cash balance"
+                    />
+                    <MetricCard
+                      label="Estimated Equity"
+                      value={formatCurrency(paperEquityEstimate)}
+                      detail="Cash plus estimated open position value"
+                    />
+                    <MetricCard
+                      label="Starting Cash"
+                      value={formatCurrency(paperStartingCash)}
+                      detail="Initial paper funding level"
+                    />
+                    <MetricCard
+                      label="Total Return"
+                      value={
+                        <SignedValue value={paperTotalReturn}>
+                          {formatSignedCurrency(paperTotalReturn)}
+                        </SignedValue>
+                      }
+                      detail={
+                        <SignedValue value={paperTotalReturnPercent}>
+                          {formatPercent(paperTotalReturnPercent)}
+                        </SignedValue>
+                      }
+                    />
+                    <MetricCard
+                      label="Unrealized Gain/Loss"
+                      value={
+                        <SignedValue value={selectedPaperMetrics?.unrealizedGain ?? 0}>
+                          {formatSignedCurrency(
+                            selectedPaperMetrics?.unrealizedGain ?? 0,
+                          )}
+                        </SignedValue>
+                      }
+                      detail={
+                        <SignedValue value={selectedPaperMetrics?.unrealizedGainPercent ?? 0}>
+                          {formatPercent(
+                            selectedPaperMetrics?.unrealizedGainPercent ?? 0,
+                          )}
+                        </SignedValue>
+                      }
+                    />
+                  </div>
+
+                  <div className="grid gap-4 md:grid-cols-2 xl:grid-cols-5">
+                    <DetailRow label="Position Count" value={String(selectedPaperPositions.length)} />
+                    <DetailRow label="Open Orders" value={String(selectedPaperSummary.open_orders.length)} />
+                    <DetailRow label="Recent Fills" value={String(selectedPaperSummary.recent_fills.length)} />
+                    <DetailRow
+                      label="Realized P/L"
+                      value={
+                        <SignedValue
+                          value={selectedPaperPositions.reduce(
+                            (sum, position) => sum + position.realized_pnl,
+                            0,
+                          )}
+                        >
+                          {formatSignedCurrency(
+                            selectedPaperPositions.reduce(
+                              (sum, position) => sum + position.realized_pnl,
+                              0,
+                            ),
+                          )}
+                        </SignedValue>
+                      }
+                    />
+                    <DetailRow
+                      label="Market Value"
+                      value={formatCurrency(selectedPaperMetrics?.marketValue ?? 0)}
+                    />
+                  </div>
+
+                  <DataTable
+                    title="Positions"
+                    emptyMessage="No open positions in this paper account."
+                    columns={[
+                      "Symbol",
+                      "Quantity",
+                      "Average Price",
+                      "Current Price",
+                      "Market Value",
+                      "Unrealized $",
+                      "Unrealized %",
+                      "Realized P/L",
+                    ]}
+                    rows={selectedPaperPositions.map((position) => {
+                      const metrics = getPaperPositionMetrics(position);
+                      return [
+                        position.symbol,
+                        position.quantity.toFixed(4),
+                        formatCurrency(position.average_price),
+                        position.current_price == null
+                          ? `${formatCurrency(metrics.currentPrice)} (est.)`
+                          : formatCurrency(metrics.currentPrice),
+                        formatCurrency(metrics.marketValue),
+                        <SignedValue value={metrics.unrealizedGain}>
+                          {formatSignedCurrency(metrics.unrealizedGain)}
+                        </SignedValue>,
+                        <SignedValue value={metrics.unrealizedGainPercent}>
+                          {formatPercent(metrics.unrealizedGainPercent)}
+                        </SignedValue>,
+                        <SignedValue value={position.realized_pnl}>
+                          {formatSignedCurrency(position.realized_pnl)}
+                        </SignedValue>,
+                      ];
+                    })}
+                  />
+
+                  <DataTable
+                    title="Recent Fills"
+                    emptyMessage="No recent fills yet."
+                    columns={["Time", "Symbol", "Side", "Quantity", "Price"]}
+                    rows={selectedPaperSummary.recent_fills.map((fill) => [
+                      formatTimestamp(fill.created_at),
+                      fill.symbol,
+                      fill.side.toUpperCase(),
+                      fill.quantity.toFixed(4),
+                      formatCurrency(fill.price),
+                    ])}
+                  />
+                </>
+              )}
+            </div>
+          </Panel>
+        )}
+
+        {isLiveAccountSelected && (
+          <Panel
+            id="live-account"
+            title="Live Account Portfolio"
+            subtitle="Reserved for future display-only live account metadata."
+          >
+            <div className="space-y-4">
+              <div className="app-surface-muted rounded-2xl px-4 py-4">
+                <p className="text-sm font-medium">
+                  Live account portfolio display is not connected yet.
+                </p>
+                <p className="app-text-muted mt-2 text-sm">
+                  No real trading, broker credentials, or live broker integrations are enabled here.
+                </p>
+              </div>
+
+              {selectedAccountOption && (
+                <div className="grid gap-4 md:grid-cols-2">
+                  <DetailRow label="Account Name" value={selectedAccountOption.name} />
+                  <DetailRow
+                    label="Status"
+                    value={selectedAccountOption.is_active ? "Active" : "Inactive"}
+                  />
+                </div>
+              )}
+
+              {liveAccountsQuery.error && (
+                <ErrorInline
+                  message={
+                    liveAccountsQuery.error instanceof Error
+                      ? liveAccountsQuery.error.message
+                      : "Failed to refresh live account metadata."
+                  }
+                />
+              )}
+            </div>
+          </Panel>
+        )}
       </section>
 
       <Modal
@@ -1430,7 +1840,11 @@ export function Homepage() {
   );
 }
 
-function MetricCard(props: { label: string; value: string; detail: string }) {
+function MetricCard(props: {
+  label: string;
+  value: React.ReactNode;
+  detail: React.ReactNode;
+}) {
   return (
     <div className="app-surface-muted rounded-2xl p-4">
       <p className="app-text-muted text-sm">{props.label}</p>
@@ -1442,7 +1856,7 @@ function MetricCard(props: { label: string; value: string; detail: string }) {
   );
 }
 
-function DetailRow(props: { label: string; value: string }) {
+function DetailRow(props: { label: string; value: React.ReactNode }) {
   return (
     <div className="app-surface rounded-xl px-4 py-3">
       <dt className="app-text-muted text-xs uppercase tracking-[0.16em]">
@@ -1451,6 +1865,57 @@ function DetailRow(props: { label: string; value: string }) {
       <dd className="mt-2 text-sm font-medium">
         {props.value}
       </dd>
+    </div>
+  );
+}
+
+function DataTable(props: {
+  title: string;
+  columns: string[];
+  rows: React.ReactNode[][];
+  emptyMessage: string;
+}) {
+  return (
+    <div className="app-surface overflow-hidden rounded-2xl">
+      <div className="app-surface-muted flex items-center justify-between gap-3 px-4 py-3">
+        <p className="text-sm font-medium">
+          {props.title}
+        </p>
+        <p className="app-text-muted text-xs uppercase tracking-[0.18em]">
+          {props.rows.length} rows
+        </p>
+      </div>
+
+      {!props.rows.length ? (
+        <div className="app-text-muted px-4 py-8 text-sm">
+          {props.emptyMessage}
+        </div>
+      ) : (
+        <div className="overflow-x-auto">
+          <table className="min-w-full text-sm">
+            <thead className="app-surface-muted">
+              <tr className="app-text-muted text-left">
+                {props.columns.map((column) => (
+                  <th key={column} className="px-4 py-3 font-medium">
+                    {column}
+                  </th>
+                ))}
+              </tr>
+            </thead>
+            <tbody style={{ background: "var(--color-surface-strong)" }}>
+              {props.rows.map((row, rowIndex) => (
+                <tr key={`${props.title}-${rowIndex}`}>
+                  {row.map((cell, cellIndex) => (
+                    <td key={`${props.title}-${rowIndex}-${cellIndex}`} className="px-4 py-3">
+                      {cell}
+                    </td>
+                  ))}
+                </tr>
+              ))}
+            </tbody>
+          </table>
+        </div>
+      )}
     </div>
   );
 }

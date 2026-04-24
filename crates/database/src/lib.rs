@@ -1,11 +1,20 @@
 use chrono::Utc;
 use models::{
+    data_sources::{
+        CreateDataSourceRequest, DataSource, DataSourceEvent, DataSourceItem,
+        EngineTraderDataSource, TraderDataSourceAssignment, UpdateDataSourceRequest,
+    },
     engine::{
         ActiveSymbol, EngineEvent, EngineEventRequest, EngineHeartbeat, EngineHeartbeatRequest,
     },
     paper::{PaperAccount, PaperAccountEvent, PaperFill, PaperOrder, PaperPosition},
     portfolio::{Portfolio, Position},
     projects::Project,
+    trader::{
+        CreateTraderEventRequest, CreateTraderInfoSourceRequest, CreateTraderTradeProposalRequest,
+        EngineRunnableTrader, Trader, TraderEvent, TraderInfoSource, TraderRuntimeState,
+        TraderTradeProposal, UpsertTraderRuntimeStateRequest,
+    },
     trading::{
         CreateStrategySignalRequest, EngineRunnableStrategy, StrategyDefinition,
         StrategyRiskConfig, StrategyRuntimeState, StrategySignal, StrategyTradingConfig,
@@ -35,8 +44,10 @@ pub struct ExecutePaperMarketOrderParams {
     pub quantity: f64,
     pub requested_price: Option<f64>,
     pub source: String,
+    pub trader_id: Option<String>,
     pub strategy_id: Option<String>,
     pub signal_id: Option<String>,
+    pub proposal_id: Option<String>,
     pub fill_price: f64,
 }
 
@@ -318,11 +329,22 @@ impl Database {
                 average_fill_price DOUBLE PRECISION NULL,
                 status TEXT NOT NULL,
                 source TEXT NOT NULL DEFAULT 'manual',
+                trader_id UUID NULL,
                 strategy_id TEXT NULL,
                 signal_id UUID NULL,
+                proposal_id UUID NULL,
                 created_at TIMESTAMPTZ NOT NULL,
                 updated_at TIMESTAMPTZ NOT NULL
             );
+            "#,
+        )
+        .execute(&self.pool)
+        .await?;
+
+        sqlx::query(
+            r#"
+            ALTER TABLE paper_orders
+            ADD COLUMN IF NOT EXISTS trader_id UUID NULL
             "#,
         )
         .execute(&self.pool)
@@ -341,6 +363,15 @@ impl Database {
             r#"
             ALTER TABLE paper_orders
             ADD COLUMN IF NOT EXISTS signal_id UUID NULL
+            "#,
+        )
+        .execute(&self.pool)
+        .await?;
+
+        sqlx::query(
+            r#"
+            ALTER TABLE paper_orders
+            ADD COLUMN IF NOT EXISTS proposal_id UUID NULL
             "#,
         )
         .execute(&self.pool)
@@ -386,6 +417,8 @@ impl Database {
             "CREATE INDEX IF NOT EXISTS idx_paper_orders_account_id ON paper_orders(account_id);",
             "CREATE INDEX IF NOT EXISTS idx_paper_orders_symbol ON paper_orders(symbol);",
             "CREATE INDEX IF NOT EXISTS idx_paper_orders_status ON paper_orders(status);",
+            "CREATE INDEX IF NOT EXISTS idx_paper_orders_trader_id ON paper_orders(trader_id);",
+            "CREATE INDEX IF NOT EXISTS idx_paper_orders_proposal_id ON paper_orders(proposal_id);",
             "CREATE INDEX IF NOT EXISTS idx_paper_orders_created_at ON paper_orders(created_at DESC);",
             "CREATE INDEX IF NOT EXISTS idx_paper_fills_account_id ON paper_fills(account_id);",
             "CREATE INDEX IF NOT EXISTS idx_paper_fills_symbol ON paper_fills(symbol);",
@@ -542,7 +575,165 @@ impl Database {
             sqlx::query(statement).execute(&self.pool).await?;
         }
 
+        self.init_trader_tables().await?;
+        self.init_scrapper_tables().await?;
         self.seed_active_symbols().await?;
+
+        Ok(())
+    }
+
+    async fn init_scrapper_tables(&self) -> Result<(), sqlx::Error> {
+        for statement in [
+            "CREATE SCHEMA IF NOT EXISTS scrapper;",
+            r#"
+            CREATE TABLE IF NOT EXISTS scrapper.data_sources (
+                id UUID PRIMARY KEY,
+                name TEXT NOT NULL,
+                source_type TEXT NOT NULL CHECK (source_type IN ('rss', 'web_page', 'manual_note', 'placeholder_api')),
+                url TEXT NULL,
+                config_json JSONB NULL,
+                enabled BOOLEAN NOT NULL DEFAULT TRUE,
+                poll_interval_seconds INTEGER NOT NULL DEFAULT 30,
+                last_checked_at TIMESTAMPTZ NULL,
+                last_success_at TIMESTAMPTZ NULL,
+                last_error TEXT NULL,
+                created_at TIMESTAMPTZ NOT NULL,
+                updated_at TIMESTAMPTZ NOT NULL
+            );
+            "#,
+            r#"
+            CREATE TABLE IF NOT EXISTS scrapper.data_source_items (
+                id UUID PRIMARY KEY,
+                data_source_id UUID NOT NULL REFERENCES scrapper.data_sources(id) ON DELETE CASCADE,
+                external_id TEXT NULL,
+                title TEXT NOT NULL,
+                url TEXT NULL,
+                content TEXT NULL,
+                summary TEXT NULL,
+                raw_payload JSONB NULL,
+                published_at TIMESTAMPTZ NULL,
+                discovered_at TIMESTAMPTZ NOT NULL,
+                created_at TIMESTAMPTZ NOT NULL,
+                UNIQUE(data_source_id, external_id)
+            );
+            "#,
+            r#"
+            CREATE TABLE IF NOT EXISTS scrapper.data_source_events (
+                id UUID PRIMARY KEY,
+                data_source_id UUID NULL REFERENCES scrapper.data_sources(id) ON DELETE SET NULL,
+                event_type TEXT NOT NULL,
+                message TEXT NOT NULL,
+                payload JSONB NULL,
+                created_at TIMESTAMPTZ NOT NULL
+            );
+            "#,
+            r#"
+            CREATE TABLE IF NOT EXISTS scrapper.trader_data_sources (
+                trader_id UUID NOT NULL,
+                data_source_id UUID NOT NULL REFERENCES scrapper.data_sources(id) ON DELETE CASCADE,
+                enabled BOOLEAN NOT NULL DEFAULT TRUE,
+                created_at TIMESTAMPTZ NOT NULL,
+                updated_at TIMESTAMPTZ NOT NULL,
+                PRIMARY KEY (trader_id, data_source_id)
+            );
+            "#,
+            "CREATE INDEX IF NOT EXISTS idx_data_sources_enabled ON scrapper.data_sources(enabled);",
+            "CREATE INDEX IF NOT EXISTS idx_data_sources_source_type ON scrapper.data_sources(source_type);",
+            "CREATE INDEX IF NOT EXISTS idx_data_source_items_source_published ON scrapper.data_source_items(data_source_id, published_at DESC);",
+            "CREATE INDEX IF NOT EXISTS idx_data_source_items_source_discovered ON scrapper.data_source_items(data_source_id, discovered_at DESC);",
+            "CREATE INDEX IF NOT EXISTS idx_data_source_events_source_created ON scrapper.data_source_events(data_source_id, created_at DESC);",
+        ] {
+            sqlx::query(statement).execute(&self.pool).await?;
+        }
+
+        Ok(())
+    }
+
+    async fn init_trader_tables(&self) -> Result<(), sqlx::Error> {
+        for statement in [
+            r#"
+            CREATE TABLE IF NOT EXISTS traders (
+                id UUID PRIMARY KEY,
+                name TEXT NOT NULL,
+                fundamental_perspective TEXT NOT NULL,
+                freedom_level TEXT NOT NULL CHECK (freedom_level IN ('analyst', 'junior_trader', 'senior_trader')),
+                status TEXT NOT NULL DEFAULT 'stopped' CHECK (status IN ('stopped', 'running', 'paused')),
+                default_paper_account_id UUID NULL REFERENCES paper_accounts(id) ON DELETE SET NULL,
+                is_active BOOLEAN NOT NULL DEFAULT TRUE,
+                created_at TIMESTAMPTZ NOT NULL,
+                updated_at TIMESTAMPTZ NOT NULL,
+                started_at TIMESTAMPTZ NULL,
+                stopped_at TIMESTAMPTZ NULL
+            );
+            "#,
+            r#"
+            CREATE TABLE IF NOT EXISTS trader_info_sources (
+                id UUID PRIMARY KEY,
+                trader_id UUID NOT NULL REFERENCES traders(id) ON DELETE CASCADE,
+                source_type TEXT NOT NULL,
+                name TEXT NOT NULL,
+                config_json JSONB NULL,
+                enabled BOOLEAN NOT NULL DEFAULT TRUE,
+                created_at TIMESTAMPTZ NOT NULL,
+                updated_at TIMESTAMPTZ NOT NULL
+            );
+            "#,
+            r#"
+            CREATE TABLE IF NOT EXISTS trader_secrets (
+                trader_id UUID PRIMARY KEY REFERENCES traders(id) ON DELETE CASCADE,
+                openai_api_key_secret TEXT NOT NULL,
+                created_at TIMESTAMPTZ NOT NULL,
+                updated_at TIMESTAMPTZ NOT NULL
+            );
+            "#,
+            r#"
+            CREATE TABLE IF NOT EXISTS trader_runtime_state (
+                trader_id UUID PRIMARY KEY REFERENCES traders(id) ON DELETE CASCADE,
+                engine_name TEXT NULL,
+                last_heartbeat_at TIMESTAMPTZ NULL,
+                last_evaluation_at TIMESTAMPTZ NULL,
+                last_error TEXT NULL,
+                current_task TEXT NULL,
+                created_at TIMESTAMPTZ NOT NULL,
+                updated_at TIMESTAMPTZ NOT NULL
+            );
+            "#,
+            r#"
+            CREATE TABLE IF NOT EXISTS trader_events (
+                id UUID PRIMARY KEY,
+                trader_id UUID NOT NULL REFERENCES traders(id) ON DELETE CASCADE,
+                event_type TEXT NOT NULL,
+                message TEXT NOT NULL,
+                payload JSONB NULL,
+                created_at TIMESTAMPTZ NOT NULL
+            );
+            "#,
+            r#"
+            CREATE TABLE IF NOT EXISTS trader_trade_proposals (
+                id UUID PRIMARY KEY,
+                trader_id UUID NOT NULL REFERENCES traders(id) ON DELETE CASCADE,
+                symbol TEXT NOT NULL,
+                side TEXT NOT NULL CHECK (side IN ('buy', 'sell')),
+                quantity DOUBLE PRECISION NOT NULL,
+                order_type TEXT NOT NULL DEFAULT 'market',
+                reason TEXT NOT NULL,
+                confidence DOUBLE PRECISION NULL,
+                status TEXT NOT NULL DEFAULT 'pending_review',
+                reviewed_by TEXT NULL,
+                reviewed_at TIMESTAMPTZ NULL,
+                resulting_order_id UUID NULL REFERENCES paper_orders(id) ON DELETE SET NULL,
+                created_at TIMESTAMPTZ NOT NULL,
+                updated_at TIMESTAMPTZ NOT NULL
+            );
+            "#,
+            "CREATE INDEX IF NOT EXISTS idx_traders_status ON traders(status);",
+            "CREATE INDEX IF NOT EXISTS idx_traders_freedom_level ON traders(freedom_level);",
+            "CREATE INDEX IF NOT EXISTS idx_trader_events_trader_id_created_at ON trader_events(trader_id, created_at DESC);",
+            "CREATE INDEX IF NOT EXISTS idx_trader_trade_proposals_trader_id_status ON trader_trade_proposals(trader_id, status);",
+            "CREATE INDEX IF NOT EXISTS idx_trader_runtime_state_last_heartbeat_at ON trader_runtime_state(last_heartbeat_at DESC);",
+        ] {
+            sqlx::query(statement).execute(&self.pool).await?;
+        }
 
         Ok(())
     }
@@ -617,8 +808,10 @@ impl Database {
             average_fill_price: row.get("average_fill_price"),
             status: row.get("status"),
             source: row.get("source"),
+            trader_id: row.get("trader_id"),
             strategy_id: row.get("strategy_id"),
             signal_id: row.get("signal_id"),
+            proposal_id: row.get("proposal_id"),
             created_at: row.get::<String, _>("created_at"),
             updated_at: row.get::<String, _>("updated_at"),
         }
@@ -733,6 +926,174 @@ impl Database {
             risk_decision: row.try_get("risk_decision").ok(),
             risk_reason: row.try_get("risk_reason").ok(),
             order_id: row.get("order_id"),
+            created_at: row.get("created_at"),
+        }
+    }
+
+    fn row_to_trader(row: sqlx::postgres::PgRow) -> Trader {
+        Trader {
+            id: row.get("id"),
+            name: row.get("name"),
+            fundamental_perspective: row.get("fundamental_perspective"),
+            freedom_level: row.get("freedom_level"),
+            status: row.get("status"),
+            default_paper_account_id: row.get("default_paper_account_id"),
+            is_active: row.get("is_active"),
+            created_at: row.get("created_at"),
+            updated_at: row.get("updated_at"),
+            started_at: row.get("started_at"),
+            stopped_at: row.get("stopped_at"),
+        }
+    }
+
+    fn row_to_trader_info_source(row: sqlx::postgres::PgRow) -> TraderInfoSource {
+        let config_json = row
+            .try_get::<Option<String>, _>("config_json")
+            .ok()
+            .flatten()
+            .or_else(|| {
+                row.try_get::<Option<Value>, _>("config_json")
+                    .ok()
+                    .flatten()
+                    .map(|value| value.to_string())
+            });
+
+        TraderInfoSource {
+            id: row.get("id"),
+            trader_id: row.get("trader_id"),
+            source_type: row.get("source_type"),
+            name: row.get("name"),
+            config_json,
+            enabled: row.get("enabled"),
+            created_at: row.get("created_at"),
+            updated_at: row.get("updated_at"),
+        }
+    }
+
+    fn row_to_trader_runtime_state(row: sqlx::postgres::PgRow) -> TraderRuntimeState {
+        TraderRuntimeState {
+            trader_id: row.get("trader_id"),
+            engine_name: row.get("engine_name"),
+            last_heartbeat_at: row.get("last_heartbeat_at"),
+            last_evaluation_at: row.get("last_evaluation_at"),
+            last_error: row.get("last_error"),
+            current_task: row.get("current_task"),
+            created_at: row.get("created_at"),
+            updated_at: row.get("updated_at"),
+        }
+    }
+
+    fn row_to_trader_event(row: sqlx::postgres::PgRow) -> TraderEvent {
+        let payload = row
+            .try_get::<Option<String>, _>("payload")
+            .ok()
+            .flatten()
+            .or_else(|| {
+                row.try_get::<Option<Value>, _>("payload")
+                    .ok()
+                    .flatten()
+                    .map(|value| value.to_string())
+            });
+
+        TraderEvent {
+            id: row.get("id"),
+            trader_id: row.get("trader_id"),
+            event_type: row.get("event_type"),
+            message: row.get("message"),
+            payload,
+            created_at: row.get("created_at"),
+        }
+    }
+
+    fn row_to_trader_trade_proposal(row: sqlx::postgres::PgRow) -> TraderTradeProposal {
+        TraderTradeProposal {
+            id: row.get("id"),
+            trader_id: row.get("trader_id"),
+            symbol: row.get("symbol"),
+            side: row.get("side"),
+            quantity: row.get("quantity"),
+            order_type: row.get("order_type"),
+            reason: row.get("reason"),
+            confidence: row.get("confidence"),
+            status: row.get("status"),
+            reviewed_by: row.get("reviewed_by"),
+            reviewed_at: row.get("reviewed_at"),
+            resulting_order_id: row.get("resulting_order_id"),
+            created_at: row.get("created_at"),
+            updated_at: row.get("updated_at"),
+        }
+    }
+
+    fn row_to_data_source(row: sqlx::postgres::PgRow) -> DataSource {
+        let config_json = row
+            .try_get::<Option<String>, _>("config_json")
+            .ok()
+            .flatten()
+            .or_else(|| {
+                row.try_get::<Option<Value>, _>("config_json")
+                    .ok()
+                    .flatten()
+                    .map(|value| value.to_string())
+            });
+        DataSource {
+            id: row.get("id"),
+            name: row.get("name"),
+            source_type: row.get("source_type"),
+            url: row.get("url"),
+            config_json,
+            enabled: row.get("enabled"),
+            poll_interval_seconds: row.get::<i32, _>("poll_interval_seconds") as i64,
+            last_checked_at: row.get("last_checked_at"),
+            last_success_at: row.get("last_success_at"),
+            last_error: row.get("last_error"),
+            created_at: row.get("created_at"),
+            updated_at: row.get("updated_at"),
+        }
+    }
+
+    fn row_to_data_source_item(row: sqlx::postgres::PgRow) -> DataSourceItem {
+        let raw_payload = row
+            .try_get::<Option<String>, _>("raw_payload")
+            .ok()
+            .flatten()
+            .or_else(|| {
+                row.try_get::<Option<Value>, _>("raw_payload")
+                    .ok()
+                    .flatten()
+                    .map(|value| value.to_string())
+            });
+        DataSourceItem {
+            id: row.get("id"),
+            data_source_id: row.get("data_source_id"),
+            external_id: row.get("external_id"),
+            title: row.get("title"),
+            url: row.get("url"),
+            content: row.get("content"),
+            summary: row.get("summary"),
+            raw_payload,
+            published_at: row.get("published_at"),
+            discovered_at: row.get("discovered_at"),
+            created_at: row.get("created_at"),
+        }
+    }
+
+    fn row_to_data_source_event(row: sqlx::postgres::PgRow) -> DataSourceEvent {
+        let payload = row
+            .try_get::<Option<String>, _>("payload")
+            .ok()
+            .flatten()
+            .or_else(|| {
+                row.try_get::<Option<Value>, _>("payload")
+                    .ok()
+                    .flatten()
+                    .map(|value| value.to_string())
+            });
+        DataSourceEvent {
+            id: row.get("id"),
+            data_source_id: row.get("data_source_id"),
+            event_type: row.get("event_type"),
+            message: row.get("message"),
+            payload,
             created_at: row.get("created_at"),
         }
     }
@@ -1075,8 +1436,10 @@ impl Database {
             average_fill_price: Some(params.fill_price),
             status: order_status,
             source: params.source.clone(),
+            trader_id: params.trader_id.clone(),
             strategy_id: params.strategy_id.clone(),
             signal_id: params.signal_id.clone(),
+            proposal_id: params.proposal_id.clone(),
             created_at: now.clone(),
             updated_at: now.clone(),
         };
@@ -1085,11 +1448,11 @@ impl Database {
             r#"
             INSERT INTO paper_orders (
                 id, account_id, symbol, side, order_type, quantity, requested_price,
-                filled_quantity, average_fill_price, status, source, strategy_id, signal_id,
-                created_at, updated_at
+                filled_quantity, average_fill_price, status, source, trader_id, strategy_id,
+                signal_id, proposal_id, created_at, updated_at
             ) VALUES (
-                $1::uuid, $2::uuid, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13::uuid,
-                $14::timestamptz, $15::timestamptz
+                $1::uuid, $2::uuid, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12::uuid, $13,
+                $14::uuid, $15::uuid, $16::timestamptz, $17::timestamptz
             )
             "#,
         )
@@ -1104,8 +1467,10 @@ impl Database {
         .bind(order.average_fill_price)
         .bind(&order.status)
         .bind(&order.source)
+        .bind(&order.trader_id)
         .bind(&order.strategy_id)
         .bind(&order.signal_id)
+        .bind(&order.proposal_id)
         .bind(&order.created_at)
         .bind(&order.updated_at)
         .execute(&mut *tx)
@@ -1289,8 +1654,10 @@ impl Database {
                 average_fill_price,
                 status,
                 source,
+                trader_id::text AS trader_id,
                 strategy_id,
                 signal_id::text AS signal_id,
+                proposal_id::text AS proposal_id,
                 created_at::text AS created_at,
                 updated_at::text AS updated_at
             FROM paper_orders
@@ -1446,8 +1813,10 @@ impl Database {
                 average_fill_price,
                 status,
                 source,
+                trader_id::text AS trader_id,
                 strategy_id,
                 signal_id::text AS signal_id,
+                proposal_id::text AS proposal_id,
                 created_at::text AS created_at,
                 updated_at::text AS updated_at
             FROM paper_orders
@@ -1745,6 +2114,863 @@ impl Database {
         Ok(strategies)
     }
 
+    pub async fn create_trader(
+        &self,
+        trader: &Trader,
+        info_sources: &[CreateTraderInfoSourceRequest],
+        openai_api_key_secret: &str,
+    ) -> Result<Trader, sqlx::Error> {
+        let mut tx = self.pool.begin().await?;
+
+        sqlx::query(
+            r#"
+            INSERT INTO traders (
+                id, name, fundamental_perspective, freedom_level, status,
+                default_paper_account_id, is_active, created_at, updated_at, started_at, stopped_at
+            ) VALUES (
+                $1::uuid, $2, $3, $4, $5, $6::uuid, $7, $8::timestamptz, $9::timestamptz,
+                $10::timestamptz, $11::timestamptz
+            )
+            "#,
+        )
+        .bind(&trader.id)
+        .bind(&trader.name)
+        .bind(&trader.fundamental_perspective)
+        .bind(&trader.freedom_level)
+        .bind(&trader.status)
+        .bind(&trader.default_paper_account_id)
+        .bind(trader.is_active)
+        .bind(&trader.created_at)
+        .bind(&trader.updated_at)
+        .bind(&trader.started_at)
+        .bind(&trader.stopped_at)
+        .execute(&mut *tx)
+        .await?;
+
+        Self::upsert_trader_secret_in_tx(&mut tx, &trader.id, openai_api_key_secret).await?;
+        Self::replace_trader_info_sources_in_tx(&mut tx, &trader.id, info_sources).await?;
+        Self::insert_trader_event_in_tx(
+            &mut tx,
+            &trader.id,
+            "trader_created",
+            "Trader created",
+            None,
+        )
+        .await?;
+
+        tx.commit().await?;
+        self.get_trader(&trader.id)
+            .await?
+            .ok_or(sqlx::Error::RowNotFound)
+    }
+
+    pub async fn list_traders(&self) -> Result<Vec<Trader>, sqlx::Error> {
+        let rows = sqlx::query(
+            r#"
+            SELECT id::text AS id, name, fundamental_perspective, freedom_level, status,
+                   default_paper_account_id::text AS default_paper_account_id, is_active,
+                   created_at::text AS created_at, updated_at::text AS updated_at,
+                   started_at::text AS started_at, stopped_at::text AS stopped_at
+            FROM traders
+            WHERE is_active = TRUE
+            ORDER BY updated_at DESC, name ASC
+            "#,
+        )
+        .fetch_all(&self.pool)
+        .await?;
+
+        Ok(rows.into_iter().map(Self::row_to_trader).collect())
+    }
+
+    pub async fn get_trader(&self, trader_id: &str) -> Result<Option<Trader>, sqlx::Error> {
+        let row = sqlx::query(
+            r#"
+            SELECT id::text AS id, name, fundamental_perspective, freedom_level, status,
+                   default_paper_account_id::text AS default_paper_account_id, is_active,
+                   created_at::text AS created_at, updated_at::text AS updated_at,
+                   started_at::text AS started_at, stopped_at::text AS stopped_at
+            FROM traders
+            WHERE id = $1::uuid AND is_active = TRUE
+            "#,
+        )
+        .bind(trader_id)
+        .fetch_optional(&self.pool)
+        .await?;
+
+        Ok(row.map(Self::row_to_trader))
+    }
+
+    pub async fn update_trader(
+        &self,
+        trader_id: &str,
+        name: Option<&str>,
+        perspective: Option<&str>,
+        freedom_level: Option<&str>,
+        default_paper_account_id: Option<&str>,
+        openai_api_key_secret: Option<&str>,
+        info_sources: Option<&[CreateTraderInfoSourceRequest]>,
+    ) -> Result<Option<Trader>, sqlx::Error> {
+        let mut tx = self.pool.begin().await?;
+        let now = Self::now_string();
+
+        let row = sqlx::query(
+            r#"
+            UPDATE traders
+            SET name = COALESCE($2, name),
+                fundamental_perspective = COALESCE($3, fundamental_perspective),
+                freedom_level = COALESCE($4, freedom_level),
+                default_paper_account_id = CASE WHEN $5 THEN $6::uuid ELSE default_paper_account_id END,
+                updated_at = $7::timestamptz
+            WHERE id = $1::uuid AND is_active = TRUE
+            RETURNING id::text AS id, name, fundamental_perspective, freedom_level, status,
+                      default_paper_account_id::text AS default_paper_account_id, is_active,
+                      created_at::text AS created_at, updated_at::text AS updated_at,
+                      started_at::text AS started_at, stopped_at::text AS stopped_at
+            "#,
+        )
+        .bind(trader_id)
+        .bind(name)
+        .bind(perspective)
+        .bind(freedom_level)
+        .bind(default_paper_account_id.is_some())
+        .bind(default_paper_account_id)
+        .bind(&now)
+        .fetch_optional(&mut *tx)
+        .await?;
+
+        let Some(row) = row else {
+            tx.rollback().await?;
+            return Ok(None);
+        };
+
+        if let Some(secret) = openai_api_key_secret {
+            Self::upsert_trader_secret_in_tx(&mut tx, trader_id, secret).await?;
+        }
+        if let Some(sources) = info_sources {
+            Self::replace_trader_info_sources_in_tx(&mut tx, trader_id, sources).await?;
+        }
+        Self::insert_trader_event_in_tx(
+            &mut tx,
+            trader_id,
+            "trader_updated",
+            "Trader updated",
+            None,
+        )
+        .await?;
+
+        tx.commit().await?;
+        Ok(Some(Self::row_to_trader(row)))
+    }
+
+    pub async fn set_trader_status(
+        &self,
+        trader_id: &str,
+        status: &str,
+        event_type: &str,
+        message: &str,
+    ) -> Result<Option<Trader>, sqlx::Error> {
+        let now = Self::now_string();
+        let row = sqlx::query(
+            r#"
+            UPDATE traders
+            SET status = $2,
+                started_at = CASE WHEN $2 = 'running' THEN $3::timestamptz ELSE started_at END,
+                stopped_at = CASE WHEN $2 = 'stopped' THEN $3::timestamptz ELSE stopped_at END,
+                updated_at = $3::timestamptz
+            WHERE id = $1::uuid AND is_active = TRUE
+            RETURNING id::text AS id, name, fundamental_perspective, freedom_level, status,
+                      default_paper_account_id::text AS default_paper_account_id, is_active,
+                      created_at::text AS created_at, updated_at::text AS updated_at,
+                      started_at::text AS started_at, stopped_at::text AS stopped_at
+            "#,
+        )
+        .bind(trader_id)
+        .bind(status)
+        .bind(&now)
+        .fetch_optional(&self.pool)
+        .await?;
+
+        if row.is_some() {
+            self.create_trader_event(
+                trader_id,
+                &CreateTraderEventRequest {
+                    event_type: event_type.to_string(),
+                    message: message.to_string(),
+                    payload: None,
+                },
+            )
+            .await?;
+        }
+
+        Ok(row.map(Self::row_to_trader))
+    }
+
+    pub async fn delete_trader(&self, trader_id: &str) -> Result<bool, sqlx::Error> {
+        let now = Self::now_string();
+        let result = sqlx::query(
+            r#"
+            UPDATE traders
+            SET is_active = FALSE, status = 'stopped', stopped_at = $2::timestamptz,
+                updated_at = $2::timestamptz
+            WHERE id = $1::uuid AND is_active = TRUE
+            "#,
+        )
+        .bind(trader_id)
+        .bind(&now)
+        .execute(&self.pool)
+        .await?;
+
+        if result.rows_affected() > 0 {
+            self.create_trader_event(
+                trader_id,
+                &CreateTraderEventRequest {
+                    event_type: "trader_deleted".to_string(),
+                    message: "Trader deleted".to_string(),
+                    payload: None,
+                },
+            )
+            .await?;
+        }
+
+        Ok(result.rows_affected() > 0)
+    }
+
+    pub async fn list_trader_info_sources(
+        &self,
+        trader_id: &str,
+    ) -> Result<Vec<TraderInfoSource>, sqlx::Error> {
+        let rows = sqlx::query(
+            r#"
+            SELECT id::text AS id, trader_id::text AS trader_id, source_type, name,
+                   config_json, enabled, created_at::text AS created_at, updated_at::text AS updated_at
+            FROM trader_info_sources
+            WHERE trader_id = $1::uuid
+            ORDER BY created_at ASC
+            "#,
+        )
+        .bind(trader_id)
+        .fetch_all(&self.pool)
+        .await?;
+
+        Ok(rows
+            .into_iter()
+            .map(Self::row_to_trader_info_source)
+            .collect())
+    }
+
+    pub async fn get_trader_runtime_state(
+        &self,
+        trader_id: &str,
+    ) -> Result<Option<TraderRuntimeState>, sqlx::Error> {
+        let row = sqlx::query(
+            r#"
+            SELECT trader_id::text AS trader_id, engine_name,
+                   last_heartbeat_at::text AS last_heartbeat_at,
+                   last_evaluation_at::text AS last_evaluation_at,
+                   last_error, current_task, created_at::text AS created_at,
+                   updated_at::text AS updated_at
+            FROM trader_runtime_state
+            WHERE trader_id = $1::uuid
+            "#,
+        )
+        .bind(trader_id)
+        .fetch_optional(&self.pool)
+        .await?;
+
+        Ok(row.map(Self::row_to_trader_runtime_state))
+    }
+
+    pub async fn upsert_trader_runtime_state(
+        &self,
+        trader_id: &str,
+        request: &UpsertTraderRuntimeStateRequest,
+    ) -> Result<TraderRuntimeState, sqlx::Error> {
+        let now = Self::now_string();
+        let row = sqlx::query(
+            r#"
+            INSERT INTO trader_runtime_state (
+                trader_id, engine_name, last_heartbeat_at, last_evaluation_at,
+                last_error, current_task, created_at, updated_at
+            ) VALUES (
+                $1::uuid, $2, $3::timestamptz, $4::timestamptz, $5, $6,
+                $7::timestamptz, $8::timestamptz
+            )
+            ON CONFLICT (trader_id) DO UPDATE SET
+                engine_name = EXCLUDED.engine_name,
+                last_heartbeat_at = EXCLUDED.last_heartbeat_at,
+                last_evaluation_at = EXCLUDED.last_evaluation_at,
+                last_error = EXCLUDED.last_error,
+                current_task = EXCLUDED.current_task,
+                updated_at = EXCLUDED.updated_at
+            RETURNING trader_id::text AS trader_id, engine_name,
+                      last_heartbeat_at::text AS last_heartbeat_at,
+                      last_evaluation_at::text AS last_evaluation_at,
+                      last_error, current_task, created_at::text AS created_at,
+                      updated_at::text AS updated_at
+            "#,
+        )
+        .bind(trader_id)
+        .bind(&request.engine_name)
+        .bind(&request.last_heartbeat_at)
+        .bind(&request.last_evaluation_at)
+        .bind(&request.last_error)
+        .bind(&request.current_task)
+        .bind(&now)
+        .bind(&now)
+        .fetch_one(&self.pool)
+        .await?;
+
+        Ok(Self::row_to_trader_runtime_state(row))
+    }
+
+    pub async fn create_trader_event(
+        &self,
+        trader_id: &str,
+        request: &CreateTraderEventRequest,
+    ) -> Result<TraderEvent, sqlx::Error> {
+        let event = TraderEvent {
+            id: Self::new_id(),
+            trader_id: trader_id.to_string(),
+            event_type: request.event_type.clone(),
+            message: request.message.clone(),
+            payload: request.payload.clone(),
+            created_at: Self::now_string(),
+        };
+
+        sqlx::query(
+            r#"
+            INSERT INTO trader_events (id, trader_id, event_type, message, payload, created_at)
+            VALUES ($1::uuid, $2::uuid, $3, $4, $5::jsonb, $6::timestamptz)
+            "#,
+        )
+        .bind(&event.id)
+        .bind(&event.trader_id)
+        .bind(&event.event_type)
+        .bind(&event.message)
+        .bind(&event.payload)
+        .bind(&event.created_at)
+        .execute(&self.pool)
+        .await?;
+
+        Ok(event)
+    }
+
+    pub async fn list_trader_events(
+        &self,
+        trader_id: &str,
+        limit: i64,
+    ) -> Result<Vec<TraderEvent>, sqlx::Error> {
+        let rows = sqlx::query(
+            r#"
+            SELECT id::text AS id, trader_id::text AS trader_id, event_type, message,
+                   payload, created_at::text AS created_at
+            FROM trader_events
+            WHERE trader_id = $1::uuid
+            ORDER BY created_at DESC, id DESC
+            LIMIT $2
+            "#,
+        )
+        .bind(trader_id)
+        .bind(limit)
+        .fetch_all(&self.pool)
+        .await?;
+
+        Ok(rows.into_iter().map(Self::row_to_trader_event).collect())
+    }
+
+    pub async fn create_trader_trade_proposal(
+        &self,
+        trader_id: &str,
+        request: &CreateTraderTradeProposalRequest,
+    ) -> Result<TraderTradeProposal, sqlx::Error> {
+        let now = Self::now_string();
+        let row = sqlx::query(
+            r#"
+            INSERT INTO trader_trade_proposals (
+                id, trader_id, symbol, side, quantity, order_type, reason, confidence,
+                status, created_at, updated_at
+            ) VALUES (
+                $1::uuid, $2::uuid, $3, $4, $5, $6, $7, $8, 'pending_review',
+                $9::timestamptz, $10::timestamptz
+            )
+            RETURNING id::text AS id, trader_id::text AS trader_id, symbol, side, quantity,
+                      order_type, reason, confidence, status, reviewed_by,
+                      reviewed_at::text AS reviewed_at, resulting_order_id::text AS resulting_order_id,
+                      created_at::text AS created_at, updated_at::text AS updated_at
+            "#,
+        )
+        .bind(Self::new_id())
+        .bind(trader_id)
+        .bind(request.symbol.trim().to_ascii_uppercase())
+        .bind(request.side.trim().to_ascii_lowercase())
+        .bind(request.quantity)
+        .bind(
+            request
+                .order_type
+                .clone()
+                .unwrap_or_else(|| "market".to_string()),
+        )
+        .bind(&request.reason)
+        .bind(request.confidence)
+        .bind(&now)
+        .bind(&now)
+        .fetch_one(&self.pool)
+        .await?;
+
+        Ok(Self::row_to_trader_trade_proposal(row))
+    }
+
+    pub async fn list_trader_trade_proposals(
+        &self,
+        trader_id: &str,
+    ) -> Result<Vec<TraderTradeProposal>, sqlx::Error> {
+        let rows = sqlx::query(
+            r#"
+            SELECT id::text AS id, trader_id::text AS trader_id, symbol, side, quantity,
+                   order_type, reason, confidence, status, reviewed_by,
+                   reviewed_at::text AS reviewed_at, resulting_order_id::text AS resulting_order_id,
+                   created_at::text AS created_at, updated_at::text AS updated_at
+            FROM trader_trade_proposals
+            WHERE trader_id = $1::uuid
+            ORDER BY created_at DESC, id DESC
+            LIMIT 100
+            "#,
+        )
+        .bind(trader_id)
+        .fetch_all(&self.pool)
+        .await?;
+
+        Ok(rows
+            .into_iter()
+            .map(Self::row_to_trader_trade_proposal)
+            .collect())
+    }
+
+    pub async fn get_trader_trade_proposal(
+        &self,
+        trader_id: &str,
+        proposal_id: &str,
+    ) -> Result<Option<TraderTradeProposal>, sqlx::Error> {
+        let row = sqlx::query(
+            r#"
+            SELECT id::text AS id, trader_id::text AS trader_id, symbol, side, quantity,
+                   order_type, reason, confidence, status, reviewed_by,
+                   reviewed_at::text AS reviewed_at, resulting_order_id::text AS resulting_order_id,
+                   created_at::text AS created_at, updated_at::text AS updated_at
+            FROM trader_trade_proposals
+            WHERE trader_id = $1::uuid AND id = $2::uuid
+            "#,
+        )
+        .bind(trader_id)
+        .bind(proposal_id)
+        .fetch_optional(&self.pool)
+        .await?;
+
+        Ok(row.map(Self::row_to_trader_trade_proposal))
+    }
+
+    pub async fn update_trader_trade_proposal_review(
+        &self,
+        trader_id: &str,
+        proposal_id: &str,
+        status: &str,
+        resulting_order_id: Option<&str>,
+    ) -> Result<Option<TraderTradeProposal>, sqlx::Error> {
+        let now = Self::now_string();
+        let row = sqlx::query(
+            r#"
+            UPDATE trader_trade_proposals
+            SET status = $3, reviewed_by = 'local_user', reviewed_at = $4::timestamptz,
+                resulting_order_id = $5::uuid, updated_at = $4::timestamptz
+            WHERE trader_id = $1::uuid AND id = $2::uuid
+            RETURNING id::text AS id, trader_id::text AS trader_id, symbol, side, quantity,
+                      order_type, reason, confidence, status, reviewed_by,
+                      reviewed_at::text AS reviewed_at, resulting_order_id::text AS resulting_order_id,
+                      created_at::text AS created_at, updated_at::text AS updated_at
+            "#,
+        )
+        .bind(trader_id)
+        .bind(proposal_id)
+        .bind(status)
+        .bind(&now)
+        .bind(resulting_order_id)
+        .fetch_optional(&self.pool)
+        .await?;
+
+        Ok(row.map(Self::row_to_trader_trade_proposal))
+    }
+
+    pub async fn list_engine_trader_configs(
+        &self,
+    ) -> Result<Vec<EngineRunnableTrader>, sqlx::Error> {
+        let rows = sqlx::query(
+            r#"
+            SELECT t.id::text AS id, t.name, t.fundamental_perspective, t.freedom_level,
+                   t.default_paper_account_id::text AS default_paper_account_id,
+                   s.openai_api_key_secret
+            FROM traders t
+            INNER JOIN trader_secrets s ON s.trader_id = t.id
+            WHERE t.is_active = TRUE AND t.status = 'running'
+            ORDER BY t.updated_at DESC, t.name ASC
+            "#,
+        )
+        .fetch_all(&self.pool)
+        .await?;
+
+        let mut traders = Vec::new();
+        for row in rows {
+            let id: String = row.get("id");
+            traders.push(EngineRunnableTrader {
+                id: id.clone(),
+                name: row.get("name"),
+                fundamental_perspective: row.get("fundamental_perspective"),
+                freedom_level: row.get("freedom_level"),
+                default_paper_account_id: row.get("default_paper_account_id"),
+                info_sources: self.list_trader_info_sources(&id).await?,
+                data_sources: self.list_engine_trader_data_sources(&id).await?,
+                openai_api_key: row.get("openai_api_key_secret"),
+            });
+        }
+
+        Ok(traders)
+    }
+
+    pub async fn create_data_source(
+        &self,
+        request: &CreateDataSourceRequest,
+    ) -> Result<DataSource, sqlx::Error> {
+        let now = Self::now_string();
+        let row = sqlx::query(
+            r#"
+            INSERT INTO scrapper.data_sources (
+                id, name, source_type, url, config_json, enabled, poll_interval_seconds, created_at, updated_at
+            ) VALUES ($1::uuid, $2, $3, $4, $5::jsonb, $6, $7, $8::timestamptz, $9::timestamptz)
+            RETURNING id::text AS id, name, source_type, url, config_json, enabled,
+                      poll_interval_seconds, last_checked_at::text AS last_checked_at,
+                      last_success_at::text AS last_success_at, last_error,
+                      created_at::text AS created_at, updated_at::text AS updated_at
+            "#,
+        )
+        .bind(Self::new_id())
+        .bind(request.name.trim())
+        .bind(request.source_type.trim())
+        .bind(request.url.as_deref().map(str::trim).filter(|value| !value.is_empty()))
+        .bind(&request.config_json)
+        .bind(request.enabled)
+        .bind(request.poll_interval_seconds.unwrap_or(30) as i32)
+        .bind(&now)
+        .bind(&now)
+        .fetch_one(&self.pool)
+        .await?;
+        Ok(Self::row_to_data_source(row))
+    }
+
+    pub async fn list_data_sources(&self) -> Result<Vec<DataSource>, sqlx::Error> {
+        let rows = sqlx::query(
+            r#"
+            SELECT id::text AS id, name, source_type, url, config_json, enabled,
+                   poll_interval_seconds, last_checked_at::text AS last_checked_at,
+                   last_success_at::text AS last_success_at, last_error,
+                   created_at::text AS created_at, updated_at::text AS updated_at
+            FROM scrapper.data_sources
+            ORDER BY updated_at DESC, name ASC
+            "#,
+        )
+        .fetch_all(&self.pool)
+        .await?;
+        Ok(rows.into_iter().map(Self::row_to_data_source).collect())
+    }
+
+    pub async fn get_data_source(
+        &self,
+        source_id: &str,
+    ) -> Result<Option<DataSource>, sqlx::Error> {
+        let row = sqlx::query(
+            r#"
+            SELECT id::text AS id, name, source_type, url, config_json, enabled,
+                   poll_interval_seconds, last_checked_at::text AS last_checked_at,
+                   last_success_at::text AS last_success_at, last_error,
+                   created_at::text AS created_at, updated_at::text AS updated_at
+            FROM scrapper.data_sources
+            WHERE id = $1::uuid
+            "#,
+        )
+        .bind(source_id)
+        .fetch_optional(&self.pool)
+        .await?;
+        Ok(row.map(Self::row_to_data_source))
+    }
+
+    pub async fn update_data_source(
+        &self,
+        source_id: &str,
+        request: &UpdateDataSourceRequest,
+    ) -> Result<Option<DataSource>, sqlx::Error> {
+        let now = Self::now_string();
+        let row = sqlx::query(
+            r#"
+            UPDATE scrapper.data_sources
+            SET name = COALESCE($2, name),
+                source_type = COALESCE($3, source_type),
+                url = CASE WHEN $4 THEN $5 ELSE url END,
+                config_json = CASE WHEN $6 THEN $7::jsonb ELSE config_json END,
+                enabled = COALESCE($8, enabled),
+                poll_interval_seconds = COALESCE($9, poll_interval_seconds),
+                updated_at = $10::timestamptz
+            WHERE id = $1::uuid
+            RETURNING id::text AS id, name, source_type, url, config_json, enabled,
+                      poll_interval_seconds, last_checked_at::text AS last_checked_at,
+                      last_success_at::text AS last_success_at, last_error,
+                      created_at::text AS created_at, updated_at::text AS updated_at
+            "#,
+        )
+        .bind(source_id)
+        .bind(request.name.as_deref().map(str::trim))
+        .bind(request.source_type.as_deref().map(str::trim))
+        .bind(request.url.is_some())
+        .bind(request.url.as_deref().map(str::trim))
+        .bind(request.config_json.is_some())
+        .bind(&request.config_json)
+        .bind(request.enabled)
+        .bind(request.poll_interval_seconds.map(|value| value as i32))
+        .bind(&now)
+        .fetch_optional(&self.pool)
+        .await?;
+        Ok(row.map(Self::row_to_data_source))
+    }
+
+    pub async fn disable_data_source(&self, source_id: &str) -> Result<bool, sqlx::Error> {
+        let result = sqlx::query(
+            "UPDATE scrapper.data_sources SET enabled = FALSE, updated_at = $2::timestamptz WHERE id = $1::uuid",
+        )
+        .bind(source_id)
+        .bind(Self::now_string())
+        .execute(&self.pool)
+        .await?;
+        Ok(result.rows_affected() > 0)
+    }
+
+    pub async fn list_data_source_items(
+        &self,
+        source_id: &str,
+        limit: i64,
+    ) -> Result<Vec<DataSourceItem>, sqlx::Error> {
+        let rows = sqlx::query(
+            r#"
+            SELECT id::text AS id, data_source_id::text AS data_source_id, external_id,
+                   title, url, content, summary, raw_payload, published_at::text AS published_at,
+                   discovered_at::text AS discovered_at, created_at::text AS created_at
+            FROM scrapper.data_source_items
+            WHERE data_source_id = $1::uuid
+            ORDER BY discovered_at DESC, id DESC
+            LIMIT $2
+            "#,
+        )
+        .bind(source_id)
+        .bind(limit)
+        .fetch_all(&self.pool)
+        .await?;
+        Ok(rows
+            .into_iter()
+            .map(Self::row_to_data_source_item)
+            .collect())
+    }
+
+    pub async fn list_data_source_events(
+        &self,
+        source_id: &str,
+        limit: i64,
+    ) -> Result<Vec<DataSourceEvent>, sqlx::Error> {
+        let rows = sqlx::query(
+            r#"
+            SELECT id::text AS id, data_source_id::text AS data_source_id, event_type,
+                   message, payload, created_at::text AS created_at
+            FROM scrapper.data_source_events
+            WHERE data_source_id = $1::uuid
+            ORDER BY created_at DESC, id DESC
+            LIMIT $2
+            "#,
+        )
+        .bind(source_id)
+        .bind(limit)
+        .fetch_all(&self.pool)
+        .await?;
+        Ok(rows
+            .into_iter()
+            .map(Self::row_to_data_source_event)
+            .collect())
+    }
+
+    pub async fn list_trader_data_sources(
+        &self,
+        trader_id: &str,
+    ) -> Result<Vec<DataSource>, sqlx::Error> {
+        let rows = sqlx::query(
+            r#"
+            SELECT ds.id::text AS id, ds.name, ds.source_type, ds.url, ds.config_json, ds.enabled,
+                   ds.poll_interval_seconds, ds.last_checked_at::text AS last_checked_at,
+                   ds.last_success_at::text AS last_success_at, ds.last_error,
+                   ds.created_at::text AS created_at, ds.updated_at::text AS updated_at
+            FROM scrapper.trader_data_sources tds
+            INNER JOIN scrapper.data_sources ds ON ds.id = tds.data_source_id
+            WHERE tds.trader_id = $1::uuid AND tds.enabled = TRUE
+            ORDER BY ds.name ASC
+            "#,
+        )
+        .bind(trader_id)
+        .fetch_all(&self.pool)
+        .await?;
+        Ok(rows.into_iter().map(Self::row_to_data_source).collect())
+    }
+
+    pub async fn replace_trader_data_sources(
+        &self,
+        trader_id: &str,
+        source_ids: &[String],
+    ) -> Result<Vec<TraderDataSourceAssignment>, sqlx::Error> {
+        let mut tx = self.pool.begin().await?;
+        sqlx::query("DELETE FROM scrapper.trader_data_sources WHERE trader_id = $1::uuid")
+            .bind(trader_id)
+            .execute(&mut *tx)
+            .await?;
+        let mut assignments = Vec::new();
+        for source_id in source_ids {
+            let now = Self::now_string();
+            sqlx::query(
+                r#"
+                INSERT INTO scrapper.trader_data_sources (trader_id, data_source_id, enabled, created_at, updated_at)
+                VALUES ($1::uuid, $2::uuid, TRUE, $3::timestamptz, $4::timestamptz)
+                "#,
+            )
+            .bind(trader_id)
+            .bind(source_id)
+            .bind(&now)
+            .bind(&now)
+            .execute(&mut *tx)
+            .await?;
+            assignments.push(TraderDataSourceAssignment {
+                trader_id: trader_id.to_string(),
+                data_source_id: source_id.clone(),
+                enabled: true,
+                created_at: now.clone(),
+                updated_at: now,
+            });
+        }
+        tx.commit().await?;
+        Ok(assignments)
+    }
+
+    async fn list_engine_trader_data_sources(
+        &self,
+        trader_id: &str,
+    ) -> Result<Vec<EngineTraderDataSource>, sqlx::Error> {
+        let rows = sqlx::query(
+            r#"
+            SELECT ds.id::text AS id, ds.name, ds.source_type
+            FROM scrapper.trader_data_sources tds
+            INNER JOIN scrapper.data_sources ds ON ds.id = tds.data_source_id
+            WHERE tds.trader_id = $1::uuid AND tds.enabled = TRUE AND ds.enabled = TRUE
+            ORDER BY ds.name ASC
+            "#,
+        )
+        .bind(trader_id)
+        .fetch_all(&self.pool)
+        .await?;
+        Ok(rows
+            .into_iter()
+            .map(|row| EngineTraderDataSource {
+                id: row.get("id"),
+                name: row.get("name"),
+                source_type: row.get("source_type"),
+            })
+            .collect())
+    }
+
+    async fn upsert_trader_secret_in_tx(
+        tx: &mut Transaction<'_, Postgres>,
+        trader_id: &str,
+        openai_api_key_secret: &str,
+    ) -> Result<(), sqlx::Error> {
+        // TODO(security): encrypt this value or move it to a Key Vault/secret manager.
+        let now = Self::now_string();
+        sqlx::query(
+            r#"
+            INSERT INTO trader_secrets (trader_id, openai_api_key_secret, created_at, updated_at)
+            VALUES ($1::uuid, $2, $3::timestamptz, $4::timestamptz)
+            ON CONFLICT (trader_id) DO UPDATE SET
+                openai_api_key_secret = EXCLUDED.openai_api_key_secret,
+                updated_at = EXCLUDED.updated_at
+            "#,
+        )
+        .bind(trader_id)
+        .bind(openai_api_key_secret)
+        .bind(&now)
+        .bind(&now)
+        .execute(&mut **tx)
+        .await?;
+
+        Ok(())
+    }
+
+    async fn replace_trader_info_sources_in_tx(
+        tx: &mut Transaction<'_, Postgres>,
+        trader_id: &str,
+        info_sources: &[CreateTraderInfoSourceRequest],
+    ) -> Result<(), sqlx::Error> {
+        sqlx::query("DELETE FROM trader_info_sources WHERE trader_id = $1::uuid")
+            .bind(trader_id)
+            .execute(&mut **tx)
+            .await?;
+
+        for source in info_sources {
+            let now = Self::now_string();
+            sqlx::query(
+                r#"
+                INSERT INTO trader_info_sources (
+                    id, trader_id, source_type, name, config_json, enabled, created_at, updated_at
+                ) VALUES ($1::uuid, $2::uuid, $3, $4, $5::jsonb, $6, $7::timestamptz, $8::timestamptz)
+                "#,
+            )
+            .bind(Self::new_id())
+            .bind(trader_id)
+            .bind(source.source_type.trim())
+            .bind(source.name.trim())
+            .bind(&source.config_json)
+            .bind(source.enabled.unwrap_or(true))
+            .bind(&now)
+            .bind(&now)
+            .execute(&mut **tx)
+            .await?;
+        }
+
+        Ok(())
+    }
+
+    async fn insert_trader_event_in_tx(
+        tx: &mut Transaction<'_, Postgres>,
+        trader_id: &str,
+        event_type: &str,
+        message: &str,
+        payload: Option<&str>,
+    ) -> Result<(), sqlx::Error> {
+        sqlx::query(
+            r#"
+            INSERT INTO trader_events (id, trader_id, event_type, message, payload, created_at)
+            VALUES ($1::uuid, $2::uuid, $3, $4, $5::jsonb, $6::timestamptz)
+            "#,
+        )
+        .bind(Self::new_id())
+        .bind(trader_id)
+        .bind(event_type)
+        .bind(message)
+        .bind(payload)
+        .bind(Self::now_string())
+        .execute(&mut **tx)
+        .await?;
+
+        Ok(())
+    }
+
     pub async fn upsert_strategy_runtime_state(
         &self,
         request: &UpsertStrategyRuntimeStateRequest,
@@ -2027,8 +3253,10 @@ impl Database {
                 average_fill_price,
                 status,
                 source,
+                trader_id::text AS trader_id,
                 strategy_id,
                 signal_id::text AS signal_id,
+                proposal_id::text AS proposal_id,
                 created_at::text AS created_at,
                 updated_at::text AS updated_at
             FROM paper_orders

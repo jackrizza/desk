@@ -1,3 +1,7 @@
+use models::chat_commands::ChatCommandRequest;
+use models::data_sources::{
+    CreateDataSourceRequest, UpdateDataSourceRequest, UpdateTraderDataSourcesRequest,
+};
 use models::engine::{
     ActiveSymbolsResponse, EngineEventRequest, EngineHealthResponse, EngineHeartbeatRequest,
 };
@@ -6,6 +10,10 @@ use models::raw::{RawStockData, StockIndicatorsResponse};
 use models::{
     portfolio::{Portfolio, Position},
     projects::Project,
+    trader::{
+        CreateTraderEventRequest, CreateTraderRequest, CreateTraderTradeProposalRequest,
+        UpdateTraderRequest, UpsertTraderRuntimeStateRequest,
+    },
     trading::{
         CreateStrategySignalRequest, UpdateStrategyRiskConfigRequest,
         UpdateStrategySignalStatusRequest, UpdateStrategyTradingConfigRequest,
@@ -34,27 +42,37 @@ use tracing_subscriber::FmtSubscriber;
 use env_logger;
 use log::{error, info};
 
+mod chat_commands;
+mod data_sources;
 mod helpers;
 mod paper;
+mod secrets;
 mod strategy_execution;
 mod strategy_risk;
 mod strategy_trading;
+mod traders;
 
 use helpers::{
-    ActiveSymbolsConfigResponse, ApiTags, CancelPaperOrderResponse, CreatePaperAccountResponse,
-    CreatePortfolioResponse, CreatePositionResponse, CreateProjectResponse,
-    CreateStrategySignalResponse, DeletePortfolioResponse, DeletePositionResponse,
-    DeleteProjectResponse, EngineMutationResponse, EngineStrategyConfigApiResponse,
-    ExecutePaperOrderResponse, GetPaperAccountResponse, GetPortfolioResponse, GetPositionResponse,
+    ActiveSymbolsConfigResponse, ApiTags, CancelPaperOrderResponse, ChatCommandApiResponse,
+    CreateDataSourceResponse, CreatePaperAccountResponse, CreatePortfolioResponse,
+    CreatePositionResponse, CreateProjectResponse, CreateStrategySignalResponse,
+    CreateTraderEventResponse, CreateTraderResponse, DeleteDataSourceResponse,
+    DeletePortfolioResponse, DeletePositionResponse, DeleteProjectResponse, DeleteTraderResponse,
+    EngineMutationResponse, EngineStrategyConfigApiResponse, EngineTraderConfigApiResponse,
+    ExecutePaperOrderResponse, GetDataSourceEventsResponse, GetDataSourceItemsResponse,
+    GetDataSourceResponse, GetPaperAccountResponse, GetPortfolioResponse, GetPositionResponse,
     GetProjectResponse, GetStrategyRiskConfigResponse, GetStrategyRuntimeStateResponse,
-    GetStrategySignalsResponse, GetStrategyTradingConfigResponse, ListPaperAccountsResponse,
-    ListPaperEventsResponse, ListPaperFillsResponse, ListPaperOrdersResponse,
-    ListPaperPositionsResponse, ListPortfoliosResponse, ListPositionsResponse,
-    ListProjectsResponse, PaperAccountSummaryApiResponse, StrategyRiskMutationResponse,
+    GetStrategySignalsResponse, GetStrategyTradingConfigResponse, GetTraderEventsResponse,
+    GetTraderResponse, GetTraderRuntimeStateResponse, GetTraderTradeProposalsResponse,
+    ListDataSourcesResponse, ListPaperAccountsResponse, ListPaperEventsResponse,
+    ListPaperFillsResponse, ListPaperOrdersResponse, ListPaperPositionsResponse,
+    ListPortfoliosResponse, ListPositionsResponse, ListProjectsResponse, ListTradersResponse,
+    PaperAccountSummaryApiResponse, StrategyRiskMutationResponse, TraderDataSourcesApiResponse,
+    TraderMutationResponse, TraderTradeProposalMutationResponse, UpdateDataSourceResponse,
     UpdatePortfolioResponse, UpdatePositionResponse, UpdateProjectResponse,
     UpdateStrategyRiskConfigResponse, UpdateStrategySignalResponse,
-    UpdateStrategyTradingConfigResponse, UpsertStrategyRuntimeStateResponse, error_message,
-    internal_error,
+    UpdateStrategyTradingConfigResponse, UpdateTraderResponse, UpsertStrategyRuntimeStateResponse,
+    UpsertTraderRuntimeStateResponse, error_message, internal_error,
 };
 
 struct Api {
@@ -66,6 +84,17 @@ struct Api {
 impl Api {
     fn stock_cache_key(symbol: &str, range: &str, interval: &str, prepost: bool) -> String {
         format!("{symbol}_{range}_{interval}_{prepost}")
+    }
+
+    #[oai(path = "/chat/commands", method = "post")]
+    async fn chat_commands(&self, request: Json<ChatCommandRequest>) -> ChatCommandApiResponse {
+        match chat_commands::handle(&self.database, request.0).await {
+            Ok(response) => ChatCommandApiResponse::Ok(Json(response)),
+            Err(message) if message.contains("required") || message.contains("invalid") => {
+                ChatCommandApiResponse::BadRequest(error_message(message))
+            }
+            Err(message) => ChatCommandApiResponse::InternalError(error_message(message)),
+        }
     }
 
     #[oai(path = "/hello", method = "get")]
@@ -115,6 +144,18 @@ impl Api {
         match strategy_trading::list_engine_strategy_configs(&self.database).await {
             Ok(configs) => EngineStrategyConfigApiResponse::Ok(Json(configs)),
             Err(err) => EngineStrategyConfigApiResponse::InternalError(error_message(err.message)),
+        }
+    }
+
+    #[oai(
+        path = "/engine/config/traders",
+        method = "get",
+        tag = "ApiTags::Engine"
+    )]
+    async fn engine_config_traders(&self) -> EngineTraderConfigApiResponse {
+        match traders::engine_config(&self.database).await {
+            Ok(configs) => EngineTraderConfigApiResponse::Ok(Json(configs)),
+            Err(err) => EngineTraderConfigApiResponse::InternalError(error_message(err.message)),
         }
     }
 
@@ -227,6 +268,83 @@ impl Api {
             Err(message) => {
                 UpsertStrategyRuntimeStateResponse::InternalError(error_message(message))
             }
+        }
+    }
+
+    #[oai(
+        path = "/engine/traders/:trader_id/runtime-state",
+        method = "post",
+        tag = "ApiTags::Engine"
+    )]
+    async fn engine_trader_runtime_state(
+        &self,
+        trader_id: Path<String>,
+        request: Json<UpsertTraderRuntimeStateRequest>,
+    ) -> UpsertTraderRuntimeStateResponse {
+        match traders::upsert_runtime_state(&self.database, &trader_id.0, request.0).await {
+            Ok(state) => UpsertTraderRuntimeStateResponse::Ok(Json(state)),
+            Err(err) => match err.kind {
+                traders::TraderErrorKind::BadRequest => {
+                    UpsertTraderRuntimeStateResponse::BadRequest(error_message(err.message))
+                }
+                traders::TraderErrorKind::NotFound => {
+                    UpsertTraderRuntimeStateResponse::NotFound(error_message(err.message))
+                }
+                _ => UpsertTraderRuntimeStateResponse::InternalError(error_message(err.message)),
+            },
+        }
+    }
+
+    #[oai(
+        path = "/engine/traders/:trader_id/events",
+        method = "post",
+        tag = "ApiTags::Engine"
+    )]
+    async fn engine_trader_events(
+        &self,
+        trader_id: Path<String>,
+        request: Json<CreateTraderEventRequest>,
+    ) -> CreateTraderEventResponse {
+        match traders::create_event(&self.database, &trader_id.0, request.0).await {
+            Ok(event) => CreateTraderEventResponse::Created(Json(event)),
+            Err(err) => match err.kind {
+                traders::TraderErrorKind::BadRequest => {
+                    CreateTraderEventResponse::BadRequest(error_message(err.message))
+                }
+                traders::TraderErrorKind::NotFound => {
+                    CreateTraderEventResponse::NotFound(error_message(err.message))
+                }
+                _ => CreateTraderEventResponse::InternalError(error_message(err.message)),
+            },
+        }
+    }
+
+    #[oai(
+        path = "/engine/traders/:trader_id/trade-proposals",
+        method = "post",
+        tag = "ApiTags::Engine"
+    )]
+    async fn engine_trader_trade_proposals(
+        &self,
+        trader_id: Path<String>,
+        request: Json<CreateTraderTradeProposalRequest>,
+    ) -> TraderTradeProposalMutationResponse {
+        match traders::create_trade_proposal(&self.database, &trader_id.0, request.0).await {
+            Ok(proposal) => TraderTradeProposalMutationResponse::Ok(Json(proposal)),
+            Err(err) => match err.kind {
+                traders::TraderErrorKind::BadRequest => {
+                    TraderTradeProposalMutationResponse::BadRequest(error_message(err.message))
+                }
+                traders::TraderErrorKind::NotFound => {
+                    TraderTradeProposalMutationResponse::NotFound(error_message(err.message))
+                }
+                traders::TraderErrorKind::Conflict => {
+                    TraderTradeProposalMutationResponse::Conflict(error_message(err.message))
+                }
+                traders::TraderErrorKind::Internal => {
+                    TraderTradeProposalMutationResponse::InternalError(error_message(err.message))
+                }
+            },
         }
     }
 
@@ -666,6 +784,355 @@ impl Api {
     }
 
     // ----------------------------
+    // Traders
+    // ----------------------------
+
+    #[oai(path = "/traders", method = "post", tag = "ApiTags::Trader")]
+    async fn create_trader(&self, request: Json<CreateTraderRequest>) -> CreateTraderResponse {
+        match traders::create_trader(&self.database, request.0).await {
+            Ok(trader) => CreateTraderResponse::Created(Json(trader)),
+            Err(err) => match err.kind {
+                traders::TraderErrorKind::BadRequest => {
+                    CreateTraderResponse::BadRequest(error_message(err.message))
+                }
+                _ => CreateTraderResponse::InternalError(error_message(err.message)),
+            },
+        }
+    }
+
+    #[oai(path = "/traders", method = "get", tag = "ApiTags::Trader")]
+    async fn list_traders(&self) -> ListTradersResponse {
+        match traders::list_traders(&self.database).await {
+            Ok(traders) => ListTradersResponse::Ok(Json(traders)),
+            Err(err) => ListTradersResponse::InternalError(error_message(err.message)),
+        }
+    }
+
+    #[oai(path = "/traders/:trader_id", method = "get", tag = "ApiTags::Trader")]
+    async fn get_trader(&self, trader_id: Path<String>) -> GetTraderResponse {
+        match traders::get_trader_detail(&self.database, &trader_id.0).await {
+            Ok(detail) => GetTraderResponse::Ok(Json(detail)),
+            Err(err) => match err.kind {
+                traders::TraderErrorKind::NotFound => {
+                    GetTraderResponse::NotFound(error_message(err.message))
+                }
+                _ => GetTraderResponse::InternalError(error_message(err.message)),
+            },
+        }
+    }
+
+    #[oai(path = "/traders/:trader_id", method = "put", tag = "ApiTags::Trader")]
+    async fn update_trader(
+        &self,
+        trader_id: Path<String>,
+        request: Json<UpdateTraderRequest>,
+    ) -> UpdateTraderResponse {
+        match traders::update_trader(&self.database, &trader_id.0, request.0).await {
+            Ok(trader) => UpdateTraderResponse::Ok(Json(trader)),
+            Err(err) => match err.kind {
+                traders::TraderErrorKind::BadRequest => {
+                    UpdateTraderResponse::BadRequest(error_message(err.message))
+                }
+                traders::TraderErrorKind::NotFound => {
+                    UpdateTraderResponse::NotFound(error_message(err.message))
+                }
+                _ => UpdateTraderResponse::InternalError(error_message(err.message)),
+            },
+        }
+    }
+
+    #[oai(
+        path = "/traders/:trader_id",
+        method = "delete",
+        tag = "ApiTags::Trader"
+    )]
+    async fn delete_trader(&self, trader_id: Path<String>) -> DeleteTraderResponse {
+        match traders::delete_trader(&self.database, &trader_id.0).await {
+            Ok(()) => DeleteTraderResponse::Ok,
+            Err(err) => match err.kind {
+                traders::TraderErrorKind::NotFound => {
+                    DeleteTraderResponse::NotFound(error_message(err.message))
+                }
+                _ => DeleteTraderResponse::InternalError(error_message(err.message)),
+            },
+        }
+    }
+
+    #[oai(
+        path = "/traders/:trader_id/start",
+        method = "post",
+        tag = "ApiTags::Trader"
+    )]
+    async fn start_trader(&self, trader_id: Path<String>) -> TraderMutationResponse {
+        map_trader_mutation(traders::set_status(&self.database, &trader_id.0, "running").await)
+    }
+
+    #[oai(
+        path = "/traders/:trader_id/stop",
+        method = "post",
+        tag = "ApiTags::Trader"
+    )]
+    async fn stop_trader(&self, trader_id: Path<String>) -> TraderMutationResponse {
+        map_trader_mutation(traders::set_status(&self.database, &trader_id.0, "stopped").await)
+    }
+
+    #[oai(
+        path = "/traders/:trader_id/pause",
+        method = "post",
+        tag = "ApiTags::Trader"
+    )]
+    async fn pause_trader(&self, trader_id: Path<String>) -> TraderMutationResponse {
+        map_trader_mutation(traders::set_status(&self.database, &trader_id.0, "paused").await)
+    }
+
+    #[oai(
+        path = "/traders/:trader_id/events",
+        method = "get",
+        tag = "ApiTags::Trader"
+    )]
+    async fn get_trader_events(&self, trader_id: Path<String>) -> GetTraderEventsResponse {
+        match traders::list_events(&self.database, &trader_id.0).await {
+            Ok(events) => GetTraderEventsResponse::Ok(Json(events)),
+            Err(err) => match err.kind {
+                traders::TraderErrorKind::NotFound => {
+                    GetTraderEventsResponse::NotFound(error_message(err.message))
+                }
+                _ => GetTraderEventsResponse::InternalError(error_message(err.message)),
+            },
+        }
+    }
+
+    #[oai(
+        path = "/traders/:trader_id/runtime-state",
+        method = "get",
+        tag = "ApiTags::Trader"
+    )]
+    async fn get_trader_runtime_state(
+        &self,
+        trader_id: Path<String>,
+    ) -> GetTraderRuntimeStateResponse {
+        match traders::get_runtime_state(&self.database, &trader_id.0).await {
+            Ok(state) => GetTraderRuntimeStateResponse::Ok(Json(state)),
+            Err(err) => match err.kind {
+                traders::TraderErrorKind::NotFound => {
+                    GetTraderRuntimeStateResponse::NotFound(error_message(err.message))
+                }
+                _ => GetTraderRuntimeStateResponse::InternalError(error_message(err.message)),
+            },
+        }
+    }
+
+    #[oai(
+        path = "/traders/:trader_id/trade-proposals",
+        method = "get",
+        tag = "ApiTags::Trader"
+    )]
+    async fn get_trader_trade_proposals(
+        &self,
+        trader_id: Path<String>,
+    ) -> GetTraderTradeProposalsResponse {
+        match traders::list_trade_proposals(&self.database, &trader_id.0).await {
+            Ok(proposals) => GetTraderTradeProposalsResponse::Ok(Json(proposals)),
+            Err(err) => match err.kind {
+                traders::TraderErrorKind::NotFound => {
+                    GetTraderTradeProposalsResponse::NotFound(error_message(err.message))
+                }
+                _ => GetTraderTradeProposalsResponse::InternalError(error_message(err.message)),
+            },
+        }
+    }
+
+    #[oai(
+        path = "/traders/:trader_id/trade-proposals/:proposal_id/approve",
+        method = "post",
+        tag = "ApiTags::Trader"
+    )]
+    async fn approve_trader_trade_proposal(
+        &self,
+        trader_id: Path<String>,
+        proposal_id: Path<String>,
+    ) -> TraderTradeProposalMutationResponse {
+        match traders::approve_trade_proposal(
+            &self.database,
+            &self.cache,
+            &trader_id.0,
+            &proposal_id.0,
+        )
+        .await
+        {
+            Ok(proposal) => TraderTradeProposalMutationResponse::Ok(Json(proposal)),
+            Err(err) => map_trader_proposal_error(err),
+        }
+    }
+
+    #[oai(
+        path = "/traders/:trader_id/trade-proposals/:proposal_id/reject",
+        method = "post",
+        tag = "ApiTags::Trader"
+    )]
+    async fn reject_trader_trade_proposal(
+        &self,
+        trader_id: Path<String>,
+        proposal_id: Path<String>,
+    ) -> TraderTradeProposalMutationResponse {
+        match traders::reject_trade_proposal(&self.database, &trader_id.0, &proposal_id.0).await {
+            Ok(proposal) => TraderTradeProposalMutationResponse::Ok(Json(proposal)),
+            Err(err) => map_trader_proposal_error(err),
+        }
+    }
+
+    #[oai(
+        path = "/traders/:trader_id/data-sources",
+        method = "get",
+        tag = "ApiTags::Trader"
+    )]
+    async fn get_trader_data_sources(
+        &self,
+        trader_id: Path<String>,
+    ) -> TraderDataSourcesApiResponse {
+        match data_sources::trader_sources(&self.database, &trader_id.0).await {
+            Ok(response) => TraderDataSourcesApiResponse::Ok(Json(response)),
+            Err(err) => map_data_source_trader_error(err),
+        }
+    }
+
+    #[oai(
+        path = "/traders/:trader_id/data-sources",
+        method = "put",
+        tag = "ApiTags::Trader"
+    )]
+    async fn update_trader_data_sources(
+        &self,
+        trader_id: Path<String>,
+        request: Json<UpdateTraderDataSourcesRequest>,
+    ) -> TraderDataSourcesApiResponse {
+        match data_sources::replace_trader_sources(&self.database, &trader_id.0, request.0).await {
+            Ok(response) => TraderDataSourcesApiResponse::Ok(Json(response)),
+            Err(err) => map_data_source_trader_error(err),
+        }
+    }
+
+    // ----------------------------
+    // Data Sources
+    // ----------------------------
+
+    #[oai(path = "/data-sources", method = "post", tag = "ApiTags::DataSource")]
+    async fn create_data_source(
+        &self,
+        request: Json<CreateDataSourceRequest>,
+    ) -> CreateDataSourceResponse {
+        match data_sources::create(&self.database, request.0).await {
+            Ok(source) => CreateDataSourceResponse::Created(Json(source)),
+            Err(err) => match err.kind {
+                data_sources::DataSourceErrorKind::BadRequest => {
+                    CreateDataSourceResponse::BadRequest(error_message(err.message))
+                }
+                _ => CreateDataSourceResponse::InternalError(error_message(err.message)),
+            },
+        }
+    }
+
+    #[oai(path = "/data-sources", method = "get", tag = "ApiTags::DataSource")]
+    async fn list_data_sources(&self) -> ListDataSourcesResponse {
+        match data_sources::list(&self.database).await {
+            Ok(sources) => ListDataSourcesResponse::Ok(Json(sources)),
+            Err(err) => ListDataSourcesResponse::InternalError(error_message(err.message)),
+        }
+    }
+
+    #[oai(
+        path = "/data-sources/:source_id",
+        method = "get",
+        tag = "ApiTags::DataSource"
+    )]
+    async fn get_data_source(&self, source_id: Path<String>) -> GetDataSourceResponse {
+        match data_sources::get(&self.database, &source_id.0).await {
+            Ok(source) => GetDataSourceResponse::Ok(Json(source)),
+            Err(err) => match err.kind {
+                data_sources::DataSourceErrorKind::NotFound => {
+                    GetDataSourceResponse::NotFound(error_message(err.message))
+                }
+                _ => GetDataSourceResponse::InternalError(error_message(err.message)),
+            },
+        }
+    }
+
+    #[oai(
+        path = "/data-sources/:source_id",
+        method = "put",
+        tag = "ApiTags::DataSource"
+    )]
+    async fn update_data_source(
+        &self,
+        source_id: Path<String>,
+        request: Json<UpdateDataSourceRequest>,
+    ) -> UpdateDataSourceResponse {
+        match data_sources::update(&self.database, &source_id.0, request.0).await {
+            Ok(source) => UpdateDataSourceResponse::Ok(Json(source)),
+            Err(err) => match err.kind {
+                data_sources::DataSourceErrorKind::BadRequest => {
+                    UpdateDataSourceResponse::BadRequest(error_message(err.message))
+                }
+                data_sources::DataSourceErrorKind::NotFound => {
+                    UpdateDataSourceResponse::NotFound(error_message(err.message))
+                }
+                _ => UpdateDataSourceResponse::InternalError(error_message(err.message)),
+            },
+        }
+    }
+
+    #[oai(
+        path = "/data-sources/:source_id",
+        method = "delete",
+        tag = "ApiTags::DataSource"
+    )]
+    async fn delete_data_source(&self, source_id: Path<String>) -> DeleteDataSourceResponse {
+        match data_sources::delete(&self.database, &source_id.0).await {
+            Ok(()) => DeleteDataSourceResponse::Ok,
+            Err(err) => match err.kind {
+                data_sources::DataSourceErrorKind::NotFound => {
+                    DeleteDataSourceResponse::NotFound(error_message(err.message))
+                }
+                _ => DeleteDataSourceResponse::InternalError(error_message(err.message)),
+            },
+        }
+    }
+
+    #[oai(
+        path = "/data-sources/:source_id/items",
+        method = "get",
+        tag = "ApiTags::DataSource"
+    )]
+    async fn get_data_source_items(&self, source_id: Path<String>) -> GetDataSourceItemsResponse {
+        match data_sources::items(&self.database, &source_id.0).await {
+            Ok(response) => GetDataSourceItemsResponse::Ok(Json(response)),
+            Err(err) => match err.kind {
+                data_sources::DataSourceErrorKind::NotFound => {
+                    GetDataSourceItemsResponse::NotFound(error_message(err.message))
+                }
+                _ => GetDataSourceItemsResponse::InternalError(error_message(err.message)),
+            },
+        }
+    }
+
+    #[oai(
+        path = "/data-sources/:source_id/events",
+        method = "get",
+        tag = "ApiTags::DataSource"
+    )]
+    async fn get_data_source_events(&self, source_id: Path<String>) -> GetDataSourceEventsResponse {
+        match data_sources::events(&self.database, &source_id.0).await {
+            Ok(response) => GetDataSourceEventsResponse::Ok(Json(response)),
+            Err(err) => match err.kind {
+                data_sources::DataSourceErrorKind::NotFound => {
+                    GetDataSourceEventsResponse::NotFound(error_message(err.message))
+                }
+                _ => GetDataSourceEventsResponse::InternalError(error_message(err.message)),
+            },
+        }
+    }
+
+    // ----------------------------
     // Projects
     // ----------------------------
 
@@ -905,6 +1372,61 @@ impl Api {
             Ok(true) => DeletePositionResponse::Ok,
             Ok(false) => DeletePositionResponse::NotFound,
             Err(err) => DeletePositionResponse::InternalError(internal_error(err)),
+        }
+    }
+}
+
+fn map_trader_mutation(
+    result: Result<models::trader::Trader, traders::TraderApiError>,
+) -> TraderMutationResponse {
+    match result {
+        Ok(trader) => TraderMutationResponse::Ok(Json(trader)),
+        Err(err) => match err.kind {
+            traders::TraderErrorKind::BadRequest => {
+                TraderMutationResponse::BadRequest(error_message(err.message))
+            }
+            traders::TraderErrorKind::NotFound => {
+                TraderMutationResponse::NotFound(error_message(err.message))
+            }
+            traders::TraderErrorKind::Conflict => {
+                TraderMutationResponse::Conflict(error_message(err.message))
+            }
+            traders::TraderErrorKind::Internal => {
+                TraderMutationResponse::InternalError(error_message(err.message))
+            }
+        },
+    }
+}
+
+fn map_trader_proposal_error(err: traders::TraderApiError) -> TraderTradeProposalMutationResponse {
+    match err.kind {
+        traders::TraderErrorKind::BadRequest => {
+            TraderTradeProposalMutationResponse::BadRequest(error_message(err.message))
+        }
+        traders::TraderErrorKind::NotFound => {
+            TraderTradeProposalMutationResponse::NotFound(error_message(err.message))
+        }
+        traders::TraderErrorKind::Conflict => {
+            TraderTradeProposalMutationResponse::Conflict(error_message(err.message))
+        }
+        traders::TraderErrorKind::Internal => {
+            TraderTradeProposalMutationResponse::InternalError(error_message(err.message))
+        }
+    }
+}
+
+fn map_data_source_trader_error(
+    err: data_sources::DataSourceApiError,
+) -> TraderDataSourcesApiResponse {
+    match err.kind {
+        data_sources::DataSourceErrorKind::BadRequest => {
+            TraderDataSourcesApiResponse::BadRequest(error_message(err.message))
+        }
+        data_sources::DataSourceErrorKind::NotFound => {
+            TraderDataSourcesApiResponse::NotFound(error_message(err.message))
+        }
+        data_sources::DataSourceErrorKind::Internal => {
+            TraderDataSourcesApiResponse::InternalError(error_message(err.message))
         }
     }
 }

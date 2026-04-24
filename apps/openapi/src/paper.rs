@@ -3,6 +3,7 @@ use database::{Database, ExecutePaperMarketOrderParams};
 use models::paper::{
     CreatePaperAccountRequest, CreatePaperOrderRequest, PaperAccount, PaperAccountEvent,
     PaperAccountSummaryResponse, PaperFill, PaperOrder, PaperOrderExecutionResponse, PaperPosition,
+    PaperPositionSummary,
 };
 use tracing::{info, warn};
 
@@ -109,28 +110,70 @@ pub async fn get_account_summary(
         .ok_or_else(|| PaperApiError::not_found("paper account not found"))?;
 
     let mut equity_estimate = summary_parts.account.cash_balance;
+    let mut total_cost_basis = 0.0;
+    let mut total_market_value = 0.0;
+    let mut positions = Vec::with_capacity(summary_parts.positions.len());
+
     for position in &summary_parts.positions {
-        let market_price = match get_latest_paper_price(cache, &position.symbol).await {
-            Ok(price) => price,
-            Err(err) => {
-                warn!(
-                    symbol = %position.symbol,
-                    error = %err,
-                    "latest price lookup failed for summary; falling back to average price"
-                );
-                position.average_price
-            }
+        let (market_price, current_price) =
+            match get_latest_paper_price(cache, &position.symbol).await {
+                Ok(price) => (price, Some(price)),
+                Err(err) => {
+                    warn!(
+                        symbol = %position.symbol,
+                        error = %err,
+                        "latest price lookup failed for summary; falling back to average price"
+                    );
+                    (position.average_price, None)
+                }
+            };
+
+        let cost_basis = position.quantity * position.average_price;
+        let market_value = position.quantity * market_price;
+        let unrealized_gain = market_value - cost_basis;
+        let unrealized_gain_percent = if cost_basis.abs() > f64::EPSILON {
+            (unrealized_gain / cost_basis) * 100.0
+        } else {
+            0.0
         };
 
-        equity_estimate += position.quantity * market_price;
+        total_cost_basis += cost_basis;
+        total_market_value += market_value;
+        equity_estimate += market_value;
+        positions.push(PaperPositionSummary {
+            id: position.id.clone(),
+            account_id: position.account_id.clone(),
+            symbol: position.symbol.clone(),
+            quantity: position.quantity,
+            average_price: position.average_price,
+            current_price,
+            market_value: Some(market_value),
+            cost_basis,
+            unrealized_gain,
+            unrealized_gain_percent,
+            realized_pnl: position.realized_pnl,
+            created_at: position.created_at.clone(),
+            updated_at: position.updated_at.clone(),
+        });
     }
+
+    let total_unrealized_gain = total_market_value - total_cost_basis;
+    let total_unrealized_gain_percent = if total_cost_basis.abs() > f64::EPSILON {
+        (total_unrealized_gain / total_cost_basis) * 100.0
+    } else {
+        0.0
+    };
 
     Ok(PaperAccountSummaryResponse {
         account: summary_parts.account,
-        positions: summary_parts.positions,
+        positions,
         open_orders: summary_parts.open_orders,
         recent_fills: summary_parts.recent_fills,
         equity_estimate,
+        total_cost_basis,
+        total_market_value,
+        total_unrealized_gain,
+        total_unrealized_gain_percent,
     })
 }
 
@@ -246,8 +289,10 @@ pub async fn execute_paper_market_order(
             quantity: normalized.quantity,
             requested_price: normalized.requested_price,
             source: normalized.source.clone(),
+            trader_id: normalized.trader_id.clone(),
             strategy_id: normalized.strategy_id.clone(),
             signal_id: normalized.signal_id.clone(),
+            proposal_id: normalized.proposal_id.clone(),
             fill_price,
         })
         .await
@@ -373,7 +418,7 @@ async fn get_latest_paper_price(cache: &Cache, symbol: &str) -> Result<f64, Pape
 }
 
 fn paper_price_cache_key(symbol: &str) -> String {
-    format!("{symbol}_5d_1d_false")
+    format!("{symbol}_1d_1m_false")
 }
 
 fn validate_create_account_request(
@@ -431,12 +476,20 @@ fn validate_create_order_request(
             Some(source) if !source.trim().is_empty() => source.trim().to_string(),
             _ => "manual".to_string(),
         },
+        trader_id: request
+            .trader_id
+            .map(|value| value.trim().to_string())
+            .filter(|value| !value.is_empty()),
         strategy_id: request
             .strategy_id
             .map(|value| value.trim().to_string())
             .filter(|value| !value.is_empty()),
         signal_id: request
             .signal_id
+            .map(|value| value.trim().to_string())
+            .filter(|value| !value.is_empty()),
+        proposal_id: request
+            .proposal_id
             .map(|value| value.trim().to_string())
             .filter(|value| !value.is_empty()),
     })
@@ -475,8 +528,10 @@ struct NormalizedOrderRequest {
     quantity: f64,
     requested_price: Option<f64>,
     source: String,
+    trader_id: Option<String>,
     strategy_id: Option<String>,
     signal_id: Option<String>,
+    proposal_id: Option<String>,
 }
 
 #[cfg(test)]
@@ -510,6 +565,10 @@ mod tests {
             quantity: 1.0,
             requested_price: Some(150.0),
             source: None,
+            trader_id: None,
+            strategy_id: None,
+            signal_id: None,
+            proposal_id: None,
         })
         .unwrap_err();
 

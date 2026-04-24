@@ -1,5 +1,5 @@
 import { useEffect, useState } from "react";
-import { Link, useNavigate } from "react-router";
+import { NavLink, useNavigate } from "react-router";
 import { deskApi, type Project } from "../lib/api";
 import {
     applyTheme,
@@ -174,8 +174,38 @@ export function LeftSidebar({
         <>
             <div className={`app-surface fixed top-0 left-0 z-10 h-screen w-64 border-r pt-16 transition-transform duration-200 ${open ? "translate-x-0" : "-translate-x-full"}`}>
                 <nav className="flex flex-col space-y-1 p-4">
-                    <Link to="/market/AAPL" className="app-nav-link rounded-md px-3 py-2">Market</Link>
-                    <Link to="/" className="app-nav-link rounded-md px-3 py-2">Portfolio</Link>
+                    <NavLink
+                        to="/market/AAPL"
+                        className={({ isActive }) =>
+                            `app-nav-link rounded-md px-3 py-2 ${isActive ? "font-medium" : ""}`
+                        }
+                    >
+                        Market
+                    </NavLink>
+                    <NavLink
+                        to="/"
+                        className={({ isActive }) =>
+                            `app-nav-link rounded-md px-3 py-2 ${isActive ? "font-medium" : ""}`
+                        }
+                    >
+                        Portfolio
+                    </NavLink>
+                    <NavLink
+                        to="/traders"
+                        className={({ isActive }) =>
+                            `app-nav-link rounded-md px-3 py-2 ${isActive ? "font-medium" : ""}`
+                        }
+                    >
+                        Traders
+                    </NavLink>
+                    <NavLink
+                        to="/data-sources"
+                        className={({ isActive }) =>
+                            `app-nav-link rounded-md px-3 py-2 ${isActive ? "font-medium" : ""}`
+                        }
+                    >
+                        Data Sources
+                    </NavLink>
 
                     <div>
                         <button

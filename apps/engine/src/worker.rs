@@ -10,6 +10,8 @@ use crate::{
     client::OpenApiClient,
     config::EngineConfig,
     strategy_runner::run_strategy,
+    trader_client::TraderClient,
+    trader_runner::run_traders,
     types::{EngineEventRequest, EngineHeartbeatRequest},
 };
 
@@ -19,6 +21,7 @@ const DEFAULT_PREPOST: bool = false;
 
 pub async fn run_engine(config: EngineConfig) -> Result<()> {
     let client = OpenApiClient::new(config.openapi_base_url.clone());
+    let trader_client = TraderClient::new(config.openapi_base_url.clone());
     let cache = Arc::new(Cache::new("cache_data".to_string()));
     let mut poll_interval = time::interval(Duration::from_secs(config.poll_interval_seconds));
     let shutdown = shutdown_signal();
@@ -52,7 +55,7 @@ pub async fn run_engine(config: EngineConfig) -> Result<()> {
                 break;
             }
             _ = poll_interval.tick() => {
-                if let Err(err) = run_iteration(&config, &client, cache.clone()).await {
+                if let Err(err) = run_iteration(&config, &client, &trader_client, cache.clone()).await {
                     error!(error = %err, "engine loop iteration failed");
                 }
             }
@@ -66,6 +69,7 @@ pub async fn run_engine(config: EngineConfig) -> Result<()> {
 async fn run_iteration(
     config: &EngineConfig,
     client: &OpenApiClient,
+    trader_client: &TraderClient,
     cache: Arc<Cache>,
 ) -> Result<()> {
     info!("starting engine poll iteration");
@@ -207,6 +211,18 @@ async fn run_iteration(
                 }
             }
         }
+    }
+
+    if let Err(err) = run_traders(config, trader_client).await {
+        warn!(error = %err, "failed to run traders");
+        report_event(
+            client,
+            &config.engine_name,
+            "trader_runner_failed",
+            None,
+            format!("failed to run traders: {err}"),
+        )
+        .await;
     }
 
     Ok(())

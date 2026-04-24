@@ -64,6 +64,22 @@ Returns:
 - `open_orders`
 - `recent_fills`
 - `equity_estimate`
+- `total_cost_basis`
+- `total_market_value`
+- `total_unrealized_gain`
+- `total_unrealized_gain_percent`
+
+Summary `positions` include display-only valuation fields:
+
+- `current_price`
+- `market_value`
+- `cost_basis`
+- `unrealized_gain`
+- `unrealized_gain_percent`
+
+Paper summary valuation uses the latest close from the cached `1d` / `1m` stock
+dataset. If that lookup fails, the summary falls back to the position average
+price and reports zero unrealized gain/loss for that position.
 
 ### `POST /api/paper/orders`
 
@@ -240,6 +256,15 @@ Deletes a project.
 
 ## Portfolios
 
+The frontend Portfolio tab now supports selecting:
+
+- `Manual Portfolio` for the existing manual-entry workflow
+- paper trading accounts backed by `/api/paper/accounts`
+- future live accounts through the same selector shape
+
+Live account selections are currently display-only placeholders. No live broker integration,
+credentials, or real trade execution are implemented.
+
 ### `GET /api/portfolios`
 ### `POST /api/portfolios`
 ### `GET /api/portfolios/:portfolio_id`
@@ -269,6 +294,23 @@ Positions are identified by:
 - `symbol`
 - `position_opened_at`
 
+## Frontend Account Selection
+
+The Portfolio tab persists the selected account locally under:
+
+- `portfolio:selectedAccount`
+
+Paper account views use `/api/paper/accounts/:account_id/summary` to render:
+
+- account name
+- cash balance
+- estimated equity
+- starting cash
+- return estimate
+- unrealized gain/loss dollars and percentage
+- positions
+- recent fills
+
 ## Source of Truth
 
 For the exact schema and route behavior, use:
@@ -276,3 +318,51 @@ For the exact schema and route behavior, use:
 - [main.rs](C:\Users\jack\OneDrive\Documents\Code\Rust\desk\apps\openapi\src\main.rs)
 - [lib.rs](C:\Users\jack\OneDrive\Documents\Code\Rust\desk\crates\database\src\lib.rs)
 - [api.ts](C:\Users\jack\OneDrive\Documents\Code\Rust\desk\frontend\app\lib\api.ts)
+# Trader API
+
+Trader endpoints live under `/api`. Trader OpenAI API keys are accepted only on create/update and are never returned by public Trader endpoints.
+
+Public UI endpoints:
+- `POST /traders`, `GET /traders`, `GET /traders/:trader_id`, `PUT /traders/:trader_id`, `DELETE /traders/:trader_id`
+- `POST /traders/:trader_id/start`, `/stop`, `/pause`
+- `GET /traders/:trader_id/events`, `/runtime-state`, `/trade-proposals`
+- `POST /traders/:trader_id/trade-proposals/:proposal_id/approve`
+- `POST /traders/:trader_id/trade-proposals/:proposal_id/reject`
+
+Internal engine endpoints:
+- `GET /engine/config/traders`
+- `POST /engine/traders/:trader_id/runtime-state`
+- `POST /engine/traders/:trader_id/events`
+- `POST /engine/traders/:trader_id/trade-proposals`
+
+`GET /engine/config/traders` returns active running traders and currently includes the stored OpenAI key for local engine execution. This is for v1 local Docker engine/openapi communication only and must be protected before public deployment.
+
+# Data Source API
+
+The frontend manages source configuration through OpenAPI only:
+- `POST /data-sources`
+- `GET /data-sources`
+- `GET /data-sources/:source_id`
+- `PUT /data-sources/:source_id`
+- `DELETE /data-sources/:source_id`
+- `GET /data-sources/:source_id/items`
+- `GET /data-sources/:source_id/events`
+- `GET /traders/:trader_id/data-sources`
+- `PUT /traders/:trader_id/data-sources`
+
+Supported v1 source types are `rss`, `web_page`, `manual_note`, and `placeholder_api`. RSS and web page sources require an `http://` or `https://` URL. Deletes are soft deletes that disable the source and preserve items/events.
+
+# Chat Commands
+
+`POST /chat/commands` parses and executes chat-driven app commands for Traders, Data Sources, and Trader/Data Source assignments.
+
+Request fields:
+- `message`: user chat text.
+- `context`: optional UI context such as active page or selected trader.
+- `confirmation_token` and `confirmed`: used when replying to a confirmation prompt.
+
+Responses include `handled`, `reply`, `actions`, and optional confirmation fields. Destructive or sensitive actions return `requires_confirmation = true` and must be confirmed before execution.
+
+Supported v1 actions include creating/updating/listing/starting/stopping/pausing/deleting Traders, creating/updating/listing/disabling Data Sources, showing status/items, and assigning/unassigning Data Sources to Traders. Chat commands never expose saved API keys.
+
+Parsing first uses deterministic backend command patterns. If `CHAT_COMMAND_OPENAI_API_KEY` or `OPENAI_API_KEY` is configured, unrecognized messages can be parsed by OpenAI using `CHAT_COMMAND_MODEL` or the default `gpt-5.2`.

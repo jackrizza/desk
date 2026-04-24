@@ -5,6 +5,9 @@ mod risk;
 mod risk_guard;
 mod strategy_eval;
 mod strategy_runner;
+mod trader_client;
+mod trader_runner;
+mod trader_types;
 mod types;
 mod worker;
 

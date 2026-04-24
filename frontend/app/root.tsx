@@ -1,4 +1,7 @@
 import {
+  QueryClientProvider,
+} from "@tanstack/react-query";
+import {
   isRouteErrorResponse,
   Links,
   Meta,
@@ -10,6 +13,8 @@ import {
 
 import type { Route } from "./+types/root";
 import "./app.css";
+import { AppStateProvider } from "./state/AppStateProvider";
+import { queryClient } from "./state/query-client";
 
 export const links: Route.LinksFunction = () => [
   { rel: "preconnect", href: "https://fonts.googleapis.com" },
@@ -63,10 +68,12 @@ export default function App() {
     navigation.state !== "idle" && navigation.location != null;
 
   return (
-    <>
-      <Outlet />
-      {isNavigating ? <RouteLoadingOverlay /> : null}
-    </>
+    <QueryClientProvider client={queryClient}>
+      <AppStateProvider>
+        <Outlet />
+        {isNavigating ? <RouteLoadingOverlay /> : null}
+      </AppStateProvider>
+    </QueryClientProvider>
   );
 }
 

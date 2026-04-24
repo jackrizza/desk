@@ -1,22 +1,42 @@
 import { useEffect, useMemo, useRef, useState } from "react";
-import { useNavigate, useParams } from "react-router";
+import { useQueryClient } from "@tanstack/react-query";
+import { useLocation, useNavigate } from "react-router";
+import {
+  EmptyState,
+  ErrorInline,
+  LoadingInline,
+  RefreshBadge,
+} from "../components/AppFeedback";
 import { LeftSidebar } from "../components/LeftSidebar";
+import { SignedValue } from "../components/SignedValue";
 import { Topbar } from "../components/Topbar";
 import {
   deskApi,
-  type PaperAccount,
-  type PaperAccountSummaryResponse,
   type Project,
   type RawStockData,
-  type StrategyDefinition,
   type StrategyRiskConfig,
-  type StrategyRuntimeState,
-  type StrategySignal,
   type StrategyTradingConfig,
   type TradingMode,
 } from "../lib/api";
+import { useEngineStatus } from "../hooks/useEngineStatus";
+import { queryKeys } from "../hooks/query-keys";
+import { usePaperAccounts } from "../hooks/usePaperAccounts";
+import { usePaperAccountSummary } from "../hooks/usePaperAccountSummary";
+import { useProjects } from "../hooks/useProjects";
+import {
+  useStrategyTradingConfig,
+  useUpdateStrategyTradingConfig,
+} from "../hooks/useStrategyTradingConfig";
+import {
+  useStrategyRiskConfig,
+  useUpdateStrategyRiskConfig,
+} from "../hooks/useStrategyRiskConfig";
 import { useDeskChat } from "../lib/chat";
-import { paperSummariesEqual } from "../lib/stable-compare";
+import {
+  getPaperPositionMetrics,
+  getPaperSummaryMetrics,
+} from "../lib/paper-summary";
+import { useAppState } from "../state/useAppState";
 
 type ProjectTab = "build" | "backtest" | "live";
 type BuildPanelTab = "chat" | "draft";
@@ -64,8 +84,6 @@ type StrategyTradingSettings = {
   last_stopped_at?: string | null;
 };
 
-type ProjectTradingSettingsMap = Record<string, StrategyTradingSettings>;
-
 type PaperOrderFormState = {
   symbol: string;
   side: "buy" | "sell";
@@ -101,6 +119,16 @@ const DEFAULT_TRADING_SETTINGS: StrategyTradingSettings = {
   is_enabled: false,
   last_started_at: null,
   last_stopped_at: null,
+};
+const DEFAULT_TRADING_CONFIG: StrategyTradingConfig = {
+  strategy_id: "",
+  trading_mode: "off",
+  paper_account_id: null,
+  is_enabled: false,
+  last_started_at: null,
+  last_stopped_at: null,
+  created_at: null,
+  updated_at: null,
 };
 
 const DEFAULT_RISK_FORM: RiskConfigFormState = {
@@ -151,15 +179,24 @@ function formatCurrency(value: number) {
 }
 
 function formatCurrencyWithCode(value: number, currency = "USD") {
+  const safeValue = Number.isFinite(value) ? value : 0;
   return new Intl.NumberFormat("en-US", {
     style: "currency",
     currency,
     maximumFractionDigits: 2,
-  }).format(value);
+  }).format(safeValue);
+}
+
+function formatSignedCurrencyWithCode(value: number, currency = "USD") {
+  const safeValue = Number.isFinite(value) ? value : 0;
+  const absoluteValue = Math.abs(safeValue);
+  const prefix = safeValue > 0 ? "+" : safeValue < 0 ? "-" : "";
+  return `${prefix}${formatCurrencyWithCode(absoluteValue, currency)}`;
 }
 
 function formatPercent(value: number) {
-  return `${value >= 0 ? "+" : ""}${value.toFixed(2)}%`;
+  const safeValue = Number.isFinite(value) ? value : 0;
+  return `${safeValue > 0 ? "+" : ""}${safeValue.toFixed(2)}%`;
 }
 
 function formatNumber(value: number, maximumFractionDigits = 2) {
@@ -188,7 +225,22 @@ function parseStrategyDefinition(raw: string | null | undefined): StrategyDefini
   }
 
   try {
-    return JSON.parse(raw) as StrategyDefinition;
+    const parsed = JSON.parse(raw) as Partial<StrategyDefinition> | null;
+    if (!parsed || typeof parsed !== "object") {
+      return null;
+    }
+
+    return {
+      version: typeof parsed.version === "string" && parsed.version.trim() ? parsed.version : "1",
+      entry: parsed.entry ?? {},
+      exit: parsed.exit ?? {},
+      risk: parsed.risk ?? {
+        position_size: {
+          type: "fixed_quantity",
+          quantity: 1,
+        },
+      },
+    };
   } catch {
     return null;
   }
@@ -329,11 +381,11 @@ function summarizeStrategyDefinition(definition: StrategyDefinition | null) {
     return "No executable strategy definition has been saved yet.";
   }
 
-  const entryCount = (definition.entry.all?.length ?? 0) + (definition.entry.any?.length ?? 0);
-  const exitCount = (definition.exit.all?.length ?? 0) + (definition.exit.any?.length ?? 0);
-  const quantity = definition.risk.position_size.quantity ?? 0;
+  const entryCount = (definition.entry?.all?.length ?? 0) + (definition.entry?.any?.length ?? 0);
+  const exitCount = (definition.exit?.all?.length ?? 0) + (definition.exit?.any?.length ?? 0);
+  const quantity = definition.risk?.position_size?.quantity ?? 0;
 
-  return `Engine-ready v${definition.version} strategy with ${entryCount} entry rules, ${exitCount} exit rules, fixed quantity ${quantity}, and cooldown ${definition.risk.cooldown_seconds ?? 0}s.`;
+  return `Engine-ready v${definition.version ?? "1"} strategy with ${entryCount} entry rules, ${exitCount} exit rules, fixed quantity ${quantity}, and cooldown ${definition.risk?.cooldown_seconds ?? 0}s.`;
 }
 
 function toRiskConfigForm(config: StrategyRiskConfig): RiskConfigFormState {
@@ -384,6 +436,21 @@ function parseSymbolsCsv(value: string) {
 
 function normalizeProjectTab(value?: string): ProjectTab {
   return value === "backtest" || value === "live" ? value : "build";
+}
+
+function getStrategyRouteState(pathname: string) {
+  const [, section, encodedProjectId, tab] = pathname.split("/");
+  if (section !== "strategies") {
+    return {
+      projectId: undefined,
+      tab: undefined,
+    };
+  }
+
+  return {
+    projectId: encodedProjectId ? decodeURIComponent(encodedProjectId) : undefined,
+    tab,
+  };
 }
 
 function summarizeLatestAssistantMessage(messages: ReturnType<typeof useDeskChat>["messages"]) {
@@ -607,19 +674,40 @@ function buildRefineStrategyPrompt(
   ].join("\n");
 }
 
-export default function ProjectsRoute() {
-  const params = useParams();
+type ProjectsRouteProps = {
+  routeProjectId?: string;
+  routeTab?: string;
+};
+
+export default function ProjectsRoute({
+  routeProjectId,
+  routeTab,
+}: ProjectsRouteProps = {}) {
   const navigate = useNavigate();
+  const location = useLocation();
+  const routeState = useMemo(
+    () => getStrategyRouteState(location.pathname),
+    [location.pathname],
+  );
+  const currentRouteProjectId = routeState.projectId ?? routeProjectId;
+  const currentRouteTab = routeState.tab ?? routeTab;
+  const queryClient = useQueryClient();
+  const {
+    uiState,
+    setActiveStrategyTab,
+    setSelectedPaperAccountId,
+    setSelectedStrategyId,
+  } = useAppState();
+  const projectsQuery = useProjects();
   const [sidebarOpen, setSidebarOpen] = useState(true);
   const [quoteSymbol, setQuoteSymbol] = useState("AAPL");
-  const [projects, setProjects] = useState<Project[]>([]);
-  const [loading, setLoading] = useState(true);
   const [hydrated, setHydrated] = useState(false);
   const [errorMessage, setErrorMessage] = useState("");
   const [strategyPrompt, setStrategyPrompt] = useState("");
   const [buildPanelTab, setBuildPanelTab] = useState<BuildPanelTab>("chat");
   const [backtestLoading, setBacktestLoading] = useState(false);
   const [backtestResults, setBacktestResults] = useState<BacktestResult[]>([]);
+  const [backtestError, setBacktestError] = useState("");
   const [savePending, setSavePending] = useState(false);
   const [saveMessage, setSaveMessage] = useState("");
   const [signalsForm, setSignalsForm] = useState<ProjectSignalsFormState>(
@@ -627,32 +715,15 @@ export default function ProjectsRoute() {
   );
   const [signalsSavePending, setSignalsSavePending] = useState(false);
   const [signalsSaveMessage, setSignalsSaveMessage] = useState("");
-  const [tradingSettingsByProject, setTradingSettingsByProject] = useState<ProjectTradingSettingsMap>({});
-  const [tradingConfigLoading, setTradingConfigLoading] = useState(false);
   const [liveModeMessage, setLiveModeMessage] = useState("");
-  const [paperAccounts, setPaperAccounts] = useState<PaperAccount[]>([]);
-  const [paperAccountsLoading, setPaperAccountsLoading] = useState(false);
-  const [paperAccountsError, setPaperAccountsError] = useState("");
-  const [paperSummary, setPaperSummary] = useState<PaperAccountSummaryResponse | null>(null);
-  const [paperSummaryLoading, setPaperSummaryLoading] = useState(false);
-  const [paperSummaryError, setPaperSummaryError] = useState("");
-  const [riskConfig, setRiskConfig] = useState<StrategyRiskConfig | null>(null);
   const [riskConfigForm, setRiskConfigForm] = useState<RiskConfigFormState>(DEFAULT_RISK_FORM);
-  const [riskConfigLoading, setRiskConfigLoading] = useState(false);
   const [riskConfigSaving, setRiskConfigSaving] = useState(false);
   const [riskConfigMessage, setRiskConfigMessage] = useState("");
-  const [runtimeStates, setRuntimeStates] = useState<StrategyRuntimeState[]>([]);
-  const [runtimeStatesLoading, setRuntimeStatesLoading] = useState(false);
-  const [runtimeStatesError, setRuntimeStatesError] = useState("");
-  const [strategySignals, setStrategySignals] = useState<StrategySignal[]>([]);
-  const [strategySignalsLoading, setStrategySignalsLoading] = useState(false);
-  const [strategySignalsError, setStrategySignalsError] = useState("");
   const [createPaperAccountPending, setCreatePaperAccountPending] = useState(false);
   const [createPaperAccountMessage, setCreatePaperAccountMessage] = useState("");
   const [paperOrderForm, setPaperOrderForm] = useState<PaperOrderFormState>(DEFAULT_PAPER_ORDER_FORM);
   const [paperOrderPending, setPaperOrderPending] = useState(false);
   const [paperOrderMessage, setPaperOrderMessage] = useState("");
-  const projectsSnapshotRef = useRef("");
   const backtestSignatureRef = useRef("");
   const chatScrollRef = useRef<HTMLDivElement | null>(null);
 
@@ -661,67 +732,89 @@ export default function ProjectsRoute() {
   }, []);
 
   useEffect(() => {
-    let cancelled = false;
-
-    async function loadProjects() {
-      try {
-        const nextProjects = await deskApi.listProjects();
-        if (cancelled) {
-          return;
-        }
-
-        const nextSnapshot = serialize(nextProjects);
-        if (projectsSnapshotRef.current !== nextSnapshot) {
-          projectsSnapshotRef.current = nextSnapshot;
-          setProjects(nextProjects);
-        }
-        setErrorMessage("");
-      } catch (error) {
-        if (!cancelled) {
-          setErrorMessage(
-            error instanceof Error ? error.message : "Failed to load projects.",
-          );
-          setProjects([]);
-        }
-      } finally {
-        if (!cancelled) {
-          setLoading(false);
-        }
-      }
+    if (projectsQuery.error) {
+      setErrorMessage(
+        projectsQuery.error instanceof Error
+          ? projectsQuery.error.message
+          : "Failed to load projects.",
+      );
+      return;
     }
 
-    void loadProjects();
-    const intervalId = window.setInterval(() => {
-      void loadProjects();
-    }, 2000);
-
-    return () => {
-      cancelled = true;
-      window.clearInterval(intervalId);
-    };
-  }, []);
+    setErrorMessage("");
+  }, [projectsQuery.error]);
 
   const selectedProject = useMemo(() => {
+    const projects = projectsQuery.data ?? [];
     if (!projects.length) {
       return null;
     }
 
-    return projects.find((project) => project.id === params.projectId) ?? projects[0] ?? null;
-  }, [params.projectId, projects]);
-  const activeTab = normalizeProjectTab(params.tab);
+    if (currentRouteProjectId) {
+      return projects.find((project) => project.id === currentRouteProjectId) ?? null;
+    }
+
+    return (
+      projects.find((project) => project.id === uiState.selectedStrategyId)
+      ?? projects[0]
+      ?? null
+    );
+  }, [currentRouteProjectId, projectsQuery.data, uiState.selectedStrategyId]);
+  const selectedProjectSymbolsKey = selectedProject?.symbols.join("|") ?? "";
+  const activeTab = useMemo(() => {
+    if (currentRouteTab) {
+      return normalizeProjectTab(currentRouteTab);
+    }
+
+    return normalizeProjectTab(uiState.activeStrategyTab);
+  }, [currentRouteTab, uiState.activeStrategyTab]);
 
   useEffect(() => {
+    const projects = projectsQuery.data ?? [];
     if (!projects.length || !selectedProject) {
       return;
     }
 
-    const targetTab = normalizeProjectTab(params.tab);
-    const targetPath = `/strategies/${encodeURIComponent(selectedProject.id)}/${targetTab}`;
+    const targetTab = currentRouteTab ? normalizeProjectTab(currentRouteTab) : activeTab;
 
-    if (params.projectId !== selectedProject.id || params.tab !== targetTab) {
-      navigate(targetPath, { replace: true });
+    if (!currentRouteProjectId) {
+      navigate(
+        `/strategies/${encodeURIComponent(selectedProject.id)}/${targetTab}`,
+        { replace: true },
+      );
+      return;
     }
-  }, [navigate, params.projectId, params.tab, projects.length, selectedProject]);
+
+    if (currentRouteProjectId !== selectedProject.id) {
+      navigate(
+        `/strategies/${encodeURIComponent(selectedProject.id)}/${targetTab}`,
+        { replace: true },
+      );
+      return;
+    }
+
+    if (currentRouteTab && currentRouteTab !== targetTab) {
+      navigate(
+        `/strategies/${encodeURIComponent(selectedProject.id)}/${targetTab}`,
+        { replace: true },
+      );
+    }
+  }, [
+    activeTab,
+    currentRouteProjectId,
+    currentRouteTab,
+    navigate,
+    projectsQuery.data,
+    selectedProject,
+  ]);
+
+  useEffect(() => {
+    setSelectedStrategyId(selectedProject?.id ?? null);
+  }, [selectedProject?.id, setSelectedStrategyId]);
+
+  useEffect(() => {
+    setActiveStrategyTab(activeTab);
+  }, [activeTab, setActiveStrategyTab]);
 
   useEffect(() => {
     setStrategyPrompt("");
@@ -734,26 +827,41 @@ export default function ProjectsRoute() {
   }, [selectedProject?.id]);
 
   useEffect(() => {
-    setSignalsForm(toSignalsFormState(selectedProject));
+    const nextSignalsForm = toSignalsFormState(selectedProject);
+    setSignalsForm((current) =>
+      serialize(current) === serialize(nextSignalsForm) ? current : nextSignalsForm,
+    );
     setSignalsSaveMessage("");
   }, [
     selectedProject?.id,
-    selectedProject?.symbols,
+    selectedProjectSymbolsKey,
     selectedProject?.interval,
     selectedProject?.range,
     selectedProject?.prepost,
   ]);
 
-  const chat = useDeskChat({
-    page: "project",
-    projectId: selectedProject?.id ?? "unassigned",
-    projectName: selectedProject?.name ?? null,
-    description: selectedProject?.description ?? null,
-    symbols: selectedProject?.symbols ?? [],
-    interval: selectedProject?.interval ?? null,
-    range: selectedProject?.range ?? null,
-    prepost: selectedProject?.prepost ?? null,
-  });
+  const projectChatContext = useMemo(
+    () => ({
+      page: "project" as const,
+      projectId: selectedProject?.id ?? "unassigned",
+      projectName: selectedProject?.name ?? null,
+      description: selectedProject?.description ?? null,
+      symbols: selectedProject?.symbols ?? [],
+      interval: selectedProject?.interval ?? null,
+      range: selectedProject?.range ?? null,
+      prepost: selectedProject?.prepost ?? null,
+    }),
+    [
+      selectedProject?.id,
+      selectedProject?.name,
+      selectedProject?.description,
+      selectedProjectSymbolsKey,
+      selectedProject?.interval,
+      selectedProject?.range,
+      selectedProject?.prepost,
+    ],
+  );
+  const chat = useDeskChat(projectChatContext);
 
   const assistantDraft = summarizeLatestAssistantMessage(chat.messages);
   const strategyDraft = assistantDraft.trim() || selectedProject?.strategy || "";
@@ -762,10 +870,56 @@ export default function ProjectsRoute() {
     [selectedProject?.strategy_json],
   );
   const canEditStrategy = hydrated && Boolean(selectedProject);
+  const tradingConfigQuery = useStrategyTradingConfig(selectedProject?.id ?? null);
+  const updateTradingConfigMutation = useUpdateStrategyTradingConfig(
+    selectedProject?.id ?? null,
+  );
+  const paperAccountsQuery = usePaperAccounts();
   const currentTradingSettings = selectedProject
-    ? tradingSettingsByProject[selectedProject.id] ?? DEFAULT_TRADING_SETTINGS
+    ? toTradingSettings(tradingConfigQuery.data ?? DEFAULT_TRADING_CONFIG)
     : DEFAULT_TRADING_SETTINGS;
-  const selectedPaperAccountId = currentTradingSettings.paper_account_id;
+  const selectedPaperAccountId =
+    currentTradingSettings.paper_account_id ?? uiState.selectedPaperAccountId;
+  const paperSummaryQuery = usePaperAccountSummary(
+    activeTab === "live" && currentTradingSettings.trading_mode === "paper"
+      ? selectedPaperAccountId
+      : null,
+  );
+  const riskConfigQuery = useStrategyRiskConfig(selectedProject?.id ?? null);
+  const updateRiskConfigMutation = useUpdateStrategyRiskConfig(
+    selectedProject?.id ?? null,
+  );
+  const engineStatusQuery = useEngineStatus(
+    selectedProject?.id ?? null,
+    activeTab === "live" && Boolean(selectedProject),
+  );
+  const runtimeStates = engineStatusQuery.data?.runtimeStates ?? [];
+  const strategySignals = engineStatusQuery.data?.strategySignals ?? [];
+  const riskConfig = riskConfigQuery.data ?? null;
+  const paperSummary = paperSummaryQuery.data ?? null;
+  // TODO: Show strategy-specific unrealized P/L once paper positions include strategy attribution.
+  const paperSummaryMetrics = paperSummary ? getPaperSummaryMetrics(paperSummary) : null;
+  const tradingConfigLoading =
+    tradingConfigQuery.isLoading || updateTradingConfigMutation.isPending;
+  const paperAccounts = paperAccountsQuery.data ?? [];
+  const paperAccountsLoading = paperAccountsQuery.isLoading;
+  const paperAccountsError =
+    paperAccountsQuery.error instanceof Error
+      ? paperAccountsQuery.error.message
+      : "";
+  const paperSummaryLoading = paperSummaryQuery.isLoading;
+  const paperSummaryError =
+    paperSummaryQuery.error instanceof Error
+      ? paperSummaryQuery.error.message
+      : "";
+  const riskConfigLoading = riskConfigQuery.isLoading;
+  const runtimeStatesLoading = engineStatusQuery.isLoading;
+  const strategySignalsLoading = engineStatusQuery.isLoading;
+  const runtimeStatesError =
+    engineStatusQuery.error instanceof Error
+      ? engineStatusQuery.error.message
+      : "";
+  const strategySignalsError = runtimeStatesError;
   const latestRuntimeState = runtimeStates[0] ?? null;
   const latestStrategySignal = strategySignals[0] ?? null;
   const latestBlockedSignal = strategySignals.find((signal) => signal.status === "blocked_by_risk") ?? null;
@@ -774,7 +928,7 @@ export default function ProjectsRoute() {
       serialize({
         activeTab,
         projectId: selectedProject?.id ?? "",
-        symbols: selectedProject?.symbols ?? [],
+        symbols: selectedProjectSymbolsKey,
         interval: selectedProject?.interval ?? "",
         range: selectedProject?.range ?? "",
         prepost: selectedProject?.prepost ?? false,
@@ -783,7 +937,7 @@ export default function ProjectsRoute() {
     [
       activeTab,
       selectedProject?.id,
-      selectedProject?.symbols,
+      selectedProjectSymbolsKey,
       selectedProject?.interval,
       selectedProject?.range,
       selectedProject?.prepost,
@@ -792,93 +946,39 @@ export default function ProjectsRoute() {
   );
 
   useEffect(() => {
-    if (!selectedProject) {
+    if (!riskConfig) {
+      setRiskConfigForm(DEFAULT_RISK_FORM);
       return;
     }
 
-    let cancelled = false;
-    setTradingConfigLoading(true);
-
-    async function loadTradingConfig() {
-      try {
-        // TODO: Switch from project id to a dedicated persisted strategy id once strategy records are split from projects.
-        const config = await deskApi.getStrategyTradingConfig(selectedProject.id);
-        if (cancelled) {
-          return;
-        }
-
-        setTradingSettingsByProject((current) => ({
-          ...current,
-          [selectedProject.id]: toTradingSettings(config),
-        }));
-        setLiveModeMessage("");
-      } catch (error) {
-        if (!cancelled) {
-          setTradingSettingsByProject((current) => ({
-            ...current,
-            [selectedProject.id]: DEFAULT_TRADING_SETTINGS,
-          }));
-          setLiveModeMessage(
-            error instanceof Error ? error.message : "Failed to load trading configuration.",
-          );
-        }
-      } finally {
-        if (!cancelled) {
-          setTradingConfigLoading(false);
-        }
-      }
-    }
-
-    void loadTradingConfig();
-
-    return () => {
-      cancelled = true;
-    };
-  }, [selectedProject?.id]);
+    setRiskConfigForm((current) => {
+      const nextForm = toRiskConfigForm(riskConfig);
+      return serialize(current) === serialize(nextForm) ? current : nextForm;
+    });
+  }, [riskConfig]);
 
   useEffect(() => {
-    if (!selectedProject) {
-      setRiskConfig(null);
-      setRiskConfigForm(DEFAULT_RISK_FORM);
-      setRiskConfigLoading(false);
-      setRiskConfigMessage("");
+    if (tradingConfigQuery.error) {
+      setLiveModeMessage(
+        tradingConfigQuery.error instanceof Error
+          ? tradingConfigQuery.error.message
+          : "Failed to load trading configuration.",
+      );
       return;
     }
 
-    let cancelled = false;
-    setRiskConfigLoading(true);
+    setLiveModeMessage("");
+  }, [tradingConfigQuery.error]);
 
-    async function loadRiskConfig() {
-      try {
-        const config = await deskApi.getStrategyRiskConfig(selectedProject.id);
-        if (cancelled) {
-          return;
-        }
-
-        setRiskConfig(config);
-        setRiskConfigForm(toRiskConfigForm(config));
-        setRiskConfigMessage("");
-      } catch (error) {
-        if (!cancelled) {
-          setRiskConfig(null);
-          setRiskConfigForm(DEFAULT_RISK_FORM);
-          setRiskConfigMessage(
-            error instanceof Error ? error.message : "Failed to load risk config.",
-          );
-        }
-      } finally {
-        if (!cancelled) {
-          setRiskConfigLoading(false);
-        }
-      }
+  useEffect(() => {
+    if (riskConfigQuery.error) {
+      setRiskConfigMessage(
+        riskConfigQuery.error instanceof Error
+          ? riskConfigQuery.error.message
+          : "Failed to load risk config.",
+      );
     }
-
-    void loadRiskConfig();
-
-    return () => {
-      cancelled = true;
-    };
-  }, [selectedProject?.id]);
+  }, [riskConfigQuery.error]);
 
   useEffect(() => {
     if (buildPanelTab !== "chat") {
@@ -900,6 +1000,7 @@ export default function ProjectsRoute() {
       if (activeTab !== "backtest" || !selectedProject?.symbols.length) {
         setBacktestResults([]);
         setBacktestLoading(false);
+        setBacktestError("");
         backtestSignatureRef.current = "";
         return;
       }
@@ -910,6 +1011,7 @@ export default function ProjectsRoute() {
 
       backtestSignatureRef.current = backtestSignature;
       setBacktestLoading(true);
+      setBacktestError("");
 
       try {
         const nextResults = await Promise.all(
@@ -927,14 +1029,17 @@ export default function ProjectsRoute() {
 
         if (!cancelled) {
           setBacktestResults(nextResults);
+          setBacktestError("");
           setErrorMessage("");
         }
       } catch (error) {
         if (!cancelled) {
-          setErrorMessage(
-            error instanceof Error ? error.message : "Failed to load backtest data.",
-          );
+          const message =
+            error instanceof Error ? error.message : "Failed to load backtest data.";
+          setBacktestError(message);
+          setErrorMessage(message);
           setBacktestResults([]);
+          backtestSignatureRef.current = "";
         }
       } finally {
         if (!cancelled) {
@@ -959,52 +1064,19 @@ export default function ProjectsRoute() {
   ]);
 
   useEffect(() => {
-    if (activeTab !== "live" || currentTradingSettings.trading_mode !== "paper") {
-      setPaperAccounts([]);
-      setPaperAccountsLoading(false);
-      setPaperAccountsError("");
-      return;
+    if (currentTradingSettings.paper_account_id) {
+      setSelectedPaperAccountId(currentTradingSettings.paper_account_id);
     }
-
-    let cancelled = false;
-    setPaperAccountsLoading(true);
-    setPaperAccountsError("");
-
-    async function loadPaperAccounts() {
-      try {
-        const accounts = await deskApi.listPaperAccounts();
-        if (cancelled) {
-          return;
-        }
-
-        setPaperAccounts(accounts);
-      } catch (error) {
-        if (!cancelled) {
-          setPaperAccounts([]);
-          setPaperAccountsError(
-            error instanceof Error ? error.message : "Failed to load paper accounts.",
-          );
-        }
-      } finally {
-        if (!cancelled) {
-          setPaperAccountsLoading(false);
-        }
-      }
-    }
-
-    void loadPaperAccounts();
-
-    return () => {
-      cancelled = true;
-    };
-  }, [activeTab, currentTradingSettings.trading_mode]);
+  }, [currentTradingSettings.paper_account_id, setSelectedPaperAccountId]);
 
   useEffect(() => {
+    const paperAccounts = paperAccountsQuery.data ?? [];
     if (
-      !selectedProject
+      activeTab !== "live"
       || currentTradingSettings.trading_mode !== "paper"
-      || paperAccountsLoading
-      || paperAccounts.length === 0
+      || !selectedProject
+      || paperAccountsQuery.isLoading
+      || !paperAccounts.length
     ) {
       return;
     }
@@ -1030,121 +1102,14 @@ export default function ProjectsRoute() {
       );
     }
   }, [
+    activeTab,
     currentTradingSettings.trading_mode,
-    paperAccounts,
-    paperAccountsLoading,
+    paperAccountsQuery.data,
+    paperAccountsQuery.isLoading,
     selectedPaperAccountId,
     selectedProject,
+    setSelectedPaperAccountId,
   ]);
-
-  useEffect(() => {
-    if (activeTab !== "live" || currentTradingSettings.trading_mode !== "paper" || !selectedPaperAccountId) {
-      setPaperSummary(null);
-      setPaperSummaryLoading(false);
-      setPaperSummaryError("");
-      return;
-    }
-
-    let cancelled = false;
-    setPaperSummaryLoading(true);
-    setPaperSummaryError("");
-
-    async function loadPaperSummary() {
-      try {
-        const nextSummary = await deskApi.getPaperAccountSummary(selectedPaperAccountId);
-        if (cancelled) {
-          return;
-        }
-
-        setPaperSummary((current) => {
-          if (paperSummariesEqual(current, nextSummary)) {
-            if (import.meta.env.DEV) {
-              console.debug("Paper summary unchanged; skipping state update");
-            }
-            return current;
-          }
-
-          return nextSummary;
-        });
-        setPaperSummaryError("");
-      } catch (error) {
-        if (!cancelled) {
-          setPaperSummaryError(
-            error instanceof Error ? error.message : "Failed to load paper account summary.",
-          );
-        }
-      } finally {
-        if (!cancelled) {
-          setPaperSummaryLoading(false);
-        }
-      }
-    }
-
-    void loadPaperSummary();
-
-    return () => {
-      cancelled = true;
-    };
-  }, [activeTab, currentTradingSettings.trading_mode, selectedPaperAccountId]);
-
-  useEffect(() => {
-    if (activeTab !== "live" || !selectedProject) {
-      setRuntimeStates([]);
-      setRuntimeStatesLoading(false);
-      setRuntimeStatesError("");
-      setStrategySignals([]);
-      setStrategySignalsLoading(false);
-      setStrategySignalsError("");
-      return;
-    }
-
-    let cancelled = false;
-
-    async function loadExecutionState() {
-      setRuntimeStatesLoading(true);
-      setStrategySignalsLoading(true);
-
-      try {
-        const [statesResponse, signalsResponse] = await Promise.all([
-          deskApi.getStrategyRuntimeState(selectedProject.id),
-          deskApi.getStrategySignals(selectedProject.id),
-        ]);
-
-        if (cancelled) {
-          return;
-        }
-
-        setRuntimeStates(statesResponse.states);
-        setRuntimeStatesError("");
-        setStrategySignals(signalsResponse.signals);
-        setStrategySignalsError("");
-      } catch (error) {
-        if (!cancelled) {
-          const message =
-            error instanceof Error ? error.message : "Failed to load engine strategy activity.";
-          setRuntimeStates([]);
-          setStrategySignals([]);
-          setRuntimeStatesError(message);
-          setStrategySignalsError(message);
-        }
-      } finally {
-        if (!cancelled) {
-          setRuntimeStatesLoading(false);
-          setStrategySignalsLoading(false);
-        }
-      }
-    }
-
-    void loadExecutionState();
-    const intervalId = window.setInterval(() => {
-      void loadExecutionState();
-    }, 5000);
-
-    return () => {
-      cancelled = true;
-      window.clearInterval(intervalId);
-    };
-  }, [activeTab, selectedProject?.id, currentTradingSettings.is_enabled, currentTradingSettings.paper_account_id]);
 
   function handleLookup() {
     const nextSymbol = quoteSymbol.trim().toUpperCase();
@@ -1163,43 +1128,26 @@ export default function ProjectsRoute() {
     navigate(`/strategies/${encodeURIComponent(selectedProject.id)}/${tab}`);
   }
 
-  function updateProjectTradingSettings(nextSettings: StrategyTradingSettings) {
-    if (!selectedProject) {
-      return;
-    }
-
-    setTradingSettingsByProject((current) => ({
-      ...current,
-      [selectedProject.id]: nextSettings,
-    }));
-  }
-
   async function persistTradingSettings(nextSettings: StrategyTradingSettings, successMessage: string) {
     if (!selectedProject) {
       return;
     }
 
-    const previousSettings = currentTradingSettings;
-    updateProjectTradingSettings(nextSettings);
-    setTradingConfigLoading(true);
     setLiveModeMessage("");
 
     try {
-      const saved = await deskApi.updateStrategyTradingConfig(selectedProject.id, {
+      const saved = await updateTradingConfigMutation.mutateAsync({
         trading_mode: nextSettings.trading_mode,
         paper_account_id: nextSettings.paper_account_id,
         is_enabled: nextSettings.is_enabled,
       });
 
-      updateProjectTradingSettings(toTradingSettings(saved));
+      setSelectedPaperAccountId(saved.paper_account_id ?? null);
       setLiveModeMessage(successMessage);
     } catch (error) {
-      updateProjectTradingSettings(previousSettings);
       setLiveModeMessage(
         error instanceof Error ? error.message : "Failed to save trading configuration.",
       );
-    } finally {
-      setTradingConfigLoading(false);
     }
   }
 
@@ -1306,7 +1254,7 @@ export default function ProjectsRoute() {
     setRiskConfigMessage("");
 
     try {
-      const config = await deskApi.updateStrategyRiskConfig(selectedProject.id, {
+      const nextConfig = await updateRiskConfigMutation.mutateAsync({
         max_dollars_per_trade: maxDollarsPerTrade,
         max_quantity_per_trade: maxQuantityPerTrade,
         max_position_value_per_symbol: maxPositionValuePerSymbol,
@@ -1321,8 +1269,7 @@ export default function ProjectsRoute() {
         kill_switch_enabled: riskConfigForm.kill_switch_enabled,
       });
 
-      setRiskConfig(config);
-      setRiskConfigForm(toRiskConfigForm(config));
+      setRiskConfigForm(toRiskConfigForm(nextConfig));
       setRiskConfigMessage("Risk controls saved.");
     } catch (error) {
       setRiskConfigMessage(
@@ -1341,9 +1288,9 @@ export default function ProjectsRoute() {
     setRiskConfigSaving(true);
     setRiskConfigMessage("");
     try {
-      const config = await deskApi.triggerStrategyKillSwitch(selectedProject.id);
-      setRiskConfig(config);
-      setRiskConfigForm(toRiskConfigForm(config));
+      const nextConfig = await deskApi.triggerStrategyKillSwitch(selectedProject.id);
+      queryClient.setQueryData(queryKeys.strategyRiskConfig(selectedProject.id), nextConfig);
+      setRiskConfigForm(toRiskConfigForm(nextConfig));
       setRiskConfigMessage("Kill switch activated. This strategy is now disabled.");
     } catch (error) {
       setRiskConfigMessage(
@@ -1362,9 +1309,9 @@ export default function ProjectsRoute() {
     setRiskConfigSaving(true);
     setRiskConfigMessage("");
     try {
-      const config = await deskApi.resumeStrategyTrading(selectedProject.id);
-      setRiskConfig(config);
-      setRiskConfigForm(toRiskConfigForm(config));
+      const nextConfig = await deskApi.resumeStrategyTrading(selectedProject.id);
+      queryClient.setQueryData(queryKeys.strategyRiskConfig(selectedProject.id), nextConfig);
+      setRiskConfigForm(toRiskConfigForm(nextConfig));
       setRiskConfigMessage("Risk config resumed trading for this strategy.");
     } catch (error) {
       setRiskConfigMessage(
@@ -1410,7 +1357,7 @@ export default function ProjectsRoute() {
         updated_at: new Date().toISOString(),
       });
 
-      setProjects((current) =>
+      queryClient.setQueryData<Project[]>(queryKeys.projects, (current = []) =>
         current.map((project) =>
           project.id === updatedProject.id ? updatedProject : project,
         ),
@@ -1461,7 +1408,7 @@ export default function ProjectsRoute() {
         updated_at: new Date().toISOString(),
       });
 
-      setProjects((current) =>
+      queryClient.setQueryData<Project[]>(queryKeys.projects, (current = []) =>
         current.map((project) =>
           project.id === updatedProject.id ? updatedProject : project,
         ),
@@ -1496,7 +1443,6 @@ export default function ProjectsRoute() {
 
     setCreatePaperAccountPending(true);
     setCreatePaperAccountMessage("");
-    setPaperAccountsError("");
 
     try {
       const account = await deskApi.createPaperAccount({
@@ -1504,7 +1450,8 @@ export default function ProjectsRoute() {
         starting_cash: 100000,
       });
 
-      setPaperAccounts((current) => [...current, account]);
+      queryClient.invalidateQueries({ queryKey: queryKeys.paperAccounts });
+      setSelectedPaperAccountId(account.id);
       await persistTradingSettings({
         trading_mode: "paper",
         paper_account_id: account.id,
@@ -1557,18 +1504,9 @@ export default function ProjectsRoute() {
 
       setPaperOrderForm(DEFAULT_PAPER_ORDER_FORM);
       setPaperOrderMessage("Paper order submitted.");
-      const nextSummary = await deskApi.getPaperAccountSummary(selectedPaperAccountId);
-      setPaperSummary((current) => {
-        if (paperSummariesEqual(current, nextSummary)) {
-          if (import.meta.env.DEV) {
-            console.debug("Paper summary unchanged after order refresh; skipping state update");
-          }
-          return current;
-        }
-
-        return nextSummary;
+      await queryClient.invalidateQueries({
+        queryKey: queryKeys.paperAccountSummary(selectedPaperAccountId),
       });
-      setPaperSummaryError("");
     } catch (error) {
       setPaperOrderMessage(
         error instanceof Error ? error.message : "Failed to submit paper order.",
@@ -1632,7 +1570,7 @@ export default function ProjectsRoute() {
               <article className="app-surface rounded-3xl p-5 shadow-sm">
                 <p className="app-text-muted text-xs uppercase tracking-[0.22em]">Strategy Workspace</p>
                 <h1 className="mt-2 text-3xl font-semibold">
-                  {selectedProject?.name ?? (loading ? "Loading strategies..." : "No strategies")}
+                    {selectedProject?.name ?? (projectsQuery.isLoading ? "Loading strategies..." : "No strategies")}
                 </h1>
                 <p className="app-text-muted mt-3 text-sm leading-6">
                   {selectedProject?.description || "Use this workspace to turn a strategy idea into an algorithmic strategy based on the symbols tracked in this strategy."}
@@ -1913,6 +1851,18 @@ export default function ProjectsRoute() {
                   </button>
                 </div>
 
+                {backtestLoading && backtestResults.length === 0 ? (
+                  <article className="app-surface rounded-3xl p-5 shadow-sm">
+                    <LoadingInline message="Running preview backtest..." />
+                  </article>
+                ) : null}
+
+                {backtestError ? (
+                  <article className="app-surface rounded-3xl p-5 shadow-sm">
+                    <ErrorInline message={backtestError} />
+                  </article>
+                ) : null}
+
                 {backtestResults.map((result) => (
                   <article key={result.symbol} className="app-surface rounded-3xl p-5 shadow-sm">
                     <div className="mb-4 flex flex-wrap items-center justify-between gap-3">
@@ -1931,14 +1881,21 @@ export default function ProjectsRoute() {
 
                     <div className="mt-4 grid gap-4 lg:grid-cols-4">
                       <InfoTile label="Final equity" value={formatCurrency(result.finalEquity)} />
-                      <InfoTile label="Return" value={formatPercent(result.totalReturnPct)} />
+                      <InfoTile
+                        label="Return"
+                        value={
+                          <SignedValue value={result.totalReturnPct}>
+                            {formatPercent(result.totalReturnPct)}
+                          </SignedValue>
+                        }
+                      />
                       <InfoTile label="Win rate" value={`${result.winRate.toFixed(1)}%`} />
                       <InfoTile label="Trades" value={`${result.tradeCount}`} />
                     </div>
                   </article>
                 ))}
 
-                {!backtestLoading && backtestResults.length === 0 ? (
+                {!backtestLoading && !backtestError && backtestResults.length === 0 ? (
                   <article className="app-surface rounded-3xl p-5 shadow-sm">
                     <div className="app-surface-muted rounded-2xl p-5">
                       <p className="text-sm leading-7">
@@ -2037,7 +1994,7 @@ export default function ProjectsRoute() {
                           Save the current strategy draft first so the engine has a structured execution config to run.
                         </p>
                       ) : null}
-                      {tradingConfigLoading ? (
+                      {updateTradingConfigMutation.isPending ? (
                         <p className="app-text-muted">Saving trading configuration...</p>
                       ) : null}
                       {liveModeMessage ? <p className="app-text-muted">{liveModeMessage}</p> : null}
@@ -2075,15 +2032,23 @@ export default function ProjectsRoute() {
                         </div>
 
                         {paperAccountsLoading ? (
-                          <p className="app-text-muted mt-4 text-sm">Loading paper accounts...</p>
+                          <div className="mt-4">
+                            <LoadingInline message="Loading paper accounts..." />
+                          </div>
                         ) : null}
                         {paperAccountsError ? (
-                          <p className="app-alert-error mt-4 rounded-2xl px-4 py-3 text-sm">{paperAccountsError}</p>
+                          <div className="mt-4">
+                            <ErrorInline message={paperAccountsError} />
+                          </div>
                         ) : null}
 
                         {!paperAccountsLoading && !paperAccountsError && paperAccounts.length === 0 ? (
+                          <div className="mt-4">
+                            <EmptyState message="No paper accounts are available yet." />
+                          </div>
+                        ) : null}
+                        {!paperAccountsLoading && !paperAccountsError && paperAccounts.length === 0 ? (
                           <div className="mt-4 rounded-2xl border border-dashed px-4 py-4 text-sm" style={{ borderColor: "var(--color-border)" }}>
-                            <p>No paper accounts are available yet.</p>
                             <p className="app-text-muted mt-2">
                               Create a default paper account with starting cash of {formatCurrency(100000)}.
                             </p>
@@ -2116,6 +2081,10 @@ export default function ProjectsRoute() {
                               This section reflects persisted strategy execution state from the backend, not browser-local state.
                             </p>
                           </div>
+                          <RefreshBadge
+                            refreshing={engineStatusQuery.isFetching}
+                            updatedLabel="Engine status synced"
+                          />
                         </div>
 
                         <div className="mt-4 grid gap-4 md:grid-cols-2 xl:grid-cols-4">
@@ -2164,13 +2133,19 @@ export default function ProjectsRoute() {
                         </div>
 
                         {runtimeStatesLoading || strategySignalsLoading ? (
-                          <p className="app-text-muted mt-4 text-sm">Refreshing runtime state from the engine...</p>
+                          <div className="mt-4">
+                            <LoadingInline message="Refreshing runtime state from the engine..." />
+                          </div>
                         ) : null}
                         {runtimeStatesError ? (
-                          <p className="app-alert-error mt-4 rounded-2xl px-4 py-3 text-sm">{runtimeStatesError}</p>
+                          <div className="mt-4">
+                            <ErrorInline message={runtimeStatesError} />
+                          </div>
                         ) : null}
                         {!runtimeStatesError && strategySignalsError ? (
-                          <p className="app-alert-error mt-4 rounded-2xl px-4 py-3 text-sm">{strategySignalsError}</p>
+                          <div className="mt-4">
+                            <ErrorInline message={strategySignalsError} />
+                          </div>
                         ) : null}
                       </section>
 
@@ -2206,7 +2181,9 @@ export default function ProjectsRoute() {
                         </div>
 
                         {riskConfigLoading ? (
-                          <p className="app-text-muted mt-4 text-sm">Loading risk controls...</p>
+                          <div className="mt-4">
+                            <LoadingInline message="Loading risk controls..." />
+                          </div>
                         ) : null}
 
                         <div className="mt-4 grid gap-4 md:grid-cols-2 xl:grid-cols-3">
@@ -2350,22 +2327,32 @@ export default function ProjectsRoute() {
                               </p>
                             </div>
                             {paperSummary?.account ? (
-                              <p className="app-text-muted text-sm">
-                                {paperSummary.account.name}
-                              </p>
+                              <div className="flex items-center gap-3">
+                                <p className="app-text-muted text-sm">
+                                  {paperSummary.account.name}
+                                </p>
+                                <RefreshBadge
+                                  refreshing={paperSummaryQuery.isFetching}
+                                  updatedLabel="Summary synced"
+                                />
+                              </div>
                             ) : null}
                           </div>
 
                           {paperSummaryLoading ? (
-                            <p className="app-text-muted mt-4 text-sm">Loading account summary...</p>
+                            <div className="mt-4">
+                              <LoadingInline message="Loading account summary..." />
+                            </div>
                           ) : null}
                           {paperSummaryError ? (
-                            <p className="app-alert-error mt-4 rounded-2xl px-4 py-3 text-sm">{paperSummaryError}</p>
+                            <div className="mt-4">
+                              <ErrorInline message={paperSummaryError} />
+                            </div>
                           ) : null}
 
                           {paperSummary ? (
                             <div className="mt-4 space-y-5">
-                              <div className="grid gap-4 md:grid-cols-2 xl:grid-cols-4">
+                              <div className="grid gap-4 md:grid-cols-2 xl:grid-cols-5">
                                 <InfoTile
                                   label="Cash Balance"
                                   value={formatCurrencyWithCode(
@@ -2383,6 +2370,25 @@ export default function ProjectsRoute() {
                                 <InfoTile
                                   label="Positions Count"
                                   value={formatNumber(paperSummary.positions.length, 0)}
+                                />
+                                <InfoTile
+                                  label="Account Unrealized"
+                                  value={
+                                    <span className="inline-flex flex-wrap gap-1">
+                                      <SignedValue value={paperSummaryMetrics?.unrealizedGain ?? 0}>
+                                        {formatSignedCurrencyWithCode(
+                                          paperSummaryMetrics?.unrealizedGain ?? 0,
+                                          paperSummary.account.currency,
+                                        )}
+                                      </SignedValue>
+                                      <span className="app-text-muted">/</span>
+                                      <SignedValue value={paperSummaryMetrics?.unrealizedGainPercent ?? 0}>
+                                        {formatPercent(
+                                          paperSummaryMetrics?.unrealizedGainPercent ?? 0,
+                                        )}
+                                      </SignedValue>
+                                    </span>
+                                  }
                                 />
                                 <InfoTile
                                   label="Recent Fills Count"
@@ -2463,13 +2469,37 @@ export default function ProjectsRoute() {
                                 <CompactTable
                                   title="Open positions"
                                   emptyMessage="No open positions in this paper account."
-                                  columns={["Symbol", "Quantity", "Avg Price", "Realized P/L"]}
-                                  rows={paperSummary.positions.map((position) => [
-                                    position.symbol,
-                                    formatNumber(position.quantity, 4),
-                                    formatCurrencyWithCode(position.average_price, paperSummary.account.currency),
-                                    formatCurrencyWithCode(position.realized_pnl, paperSummary.account.currency),
-                                  ])}
+                                  columns={[
+                                    "Symbol",
+                                    "Quantity",
+                                    "Avg Price",
+                                    "Current",
+                                    "Market Value",
+                                    "Unrealized $",
+                                    "Unrealized %",
+                                    "Realized P/L",
+                                  ]}
+                                  rows={paperSummary.positions.map((position) => {
+                                    const metrics = getPaperPositionMetrics(position);
+                                    return [
+                                      position.symbol,
+                                      formatNumber(position.quantity, 4),
+                                      formatCurrencyWithCode(position.average_price, paperSummary.account.currency),
+                                      position.current_price == null
+                                        ? `${formatCurrencyWithCode(metrics.currentPrice, paperSummary.account.currency)} (est.)`
+                                        : formatCurrencyWithCode(metrics.currentPrice, paperSummary.account.currency),
+                                      formatCurrencyWithCode(metrics.marketValue, paperSummary.account.currency),
+                                      <SignedValue value={metrics.unrealizedGain}>
+                                        {formatSignedCurrencyWithCode(metrics.unrealizedGain, paperSummary.account.currency)}
+                                      </SignedValue>,
+                                      <SignedValue value={metrics.unrealizedGainPercent}>
+                                        {formatPercent(metrics.unrealizedGainPercent)}
+                                      </SignedValue>,
+                                      <SignedValue value={position.realized_pnl}>
+                                        {formatSignedCurrencyWithCode(position.realized_pnl, paperSummary.account.currency)}
+                                      </SignedValue>,
+                                    ];
+                                  })}
                                 />
                                 <CompactTable
                                   title="Recent fills"
@@ -2540,7 +2570,7 @@ export default function ProjectsRoute() {
   );
 }
 
-function InfoTile({ label, value }: { label: string; value: string }) {
+function InfoTile({ label, value }: { label: string; value: React.ReactNode }) {
   return (
     <div className="app-surface-muted rounded-2xl px-4 py-3">
       <p className="app-text-muted text-xs uppercase tracking-[0.18em]">{label}</p>
@@ -2557,7 +2587,7 @@ function CompactTable({
 }: {
   title: string;
   columns: string[];
-  rows: string[][];
+  rows: React.ReactNode[][];
   emptyMessage: string;
 }) {
   return (
@@ -2650,7 +2680,14 @@ function SymbolBacktestChart({ result }: { result: BacktestResult }) {
               {formatCurrency(trade.entryPrice)} to {formatCurrency(trade.exitPrice)}
             </p>
             <p className="app-text-muted mt-2 text-sm">
-              {formatPercent(trade.returnPct)} ({formatCurrency(trade.profitLoss)})
+              <SignedValue value={trade.returnPct}>
+                {formatPercent(trade.returnPct)}
+              </SignedValue>{" "}
+              (
+              <SignedValue value={trade.profitLoss}>
+                {formatSignedCurrencyWithCode(trade.profitLoss)}
+              </SignedValue>
+              )
             </p>
           </div>
         ))}

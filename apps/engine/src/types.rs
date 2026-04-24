@@ -19,8 +19,10 @@ pub struct SubmitPaperOrderRequest {
     pub quantity: f64,
     pub requested_price: Option<f64>,
     pub source: Option<String>,
+    pub trader_id: Option<String>,
     pub strategy_id: Option<String>,
     pub signal_id: Option<String>,
+    pub proposal_id: Option<String>,
 }
 
 #[allow(dead_code)]

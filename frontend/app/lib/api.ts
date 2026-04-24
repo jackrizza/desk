@@ -88,6 +88,22 @@ export interface PaperAccount {
   updated_at: string;
 }
 
+export interface LiveAccount {
+  id: string;
+  name: string;
+  is_active: boolean;
+}
+
+export type TradingAccountKind = "paper" | "live" | "manual";
+
+export interface TradingAccountOption {
+  id: string;
+  name: string;
+  kind: TradingAccountKind;
+  label: string;
+  is_active: boolean;
+}
+
 export interface PaperPosition {
   id: string;
   account_id: string;
@@ -97,6 +113,14 @@ export interface PaperPosition {
   realized_pnl: number;
   created_at: string;
   updated_at: string;
+}
+
+export interface PaperPositionSummary extends PaperPosition {
+  current_price?: number | null;
+  market_value?: number | null;
+  cost_basis: number;
+  unrealized_gain: number;
+  unrealized_gain_percent: number;
 }
 
 export interface PaperOrder {
@@ -111,8 +135,10 @@ export interface PaperOrder {
   average_fill_price?: number | null;
   status: string;
   source: string;
+  trader_id?: string | null;
   strategy_id?: string | null;
   signal_id?: string | null;
+  proposal_id?: string | null;
   created_at: string;
   updated_at: string;
 }
@@ -131,10 +157,14 @@ export interface PaperFill {
 
 export interface PaperAccountSummaryResponse {
   account: PaperAccount;
-  positions: PaperPosition[];
+  positions: PaperPositionSummary[];
   open_orders: PaperOrder[];
   recent_fills: PaperFill[];
   equity_estimate: number;
+  total_cost_basis?: number;
+  total_market_value?: number;
+  total_unrealized_gain?: number;
+  total_unrealized_gain_percent?: number;
 }
 
 export interface PaperOrderExecutionResponse {
@@ -281,6 +311,195 @@ export interface UpdateStrategyTradingConfigRequest {
 
 export interface EngineStrategyConfigResponse {
   strategies: EngineRunnableStrategy[];
+}
+
+export type TraderFreedomLevel = "analyst" | "junior_trader" | "senior_trader";
+export type TraderStatus = "stopped" | "running" | "paused";
+
+export interface Trader {
+  id: string;
+  name: string;
+  fundamental_perspective: string;
+  freedom_level: TraderFreedomLevel;
+  status: TraderStatus;
+  default_paper_account_id?: string | null;
+  is_active: boolean;
+  created_at: string;
+  updated_at: string;
+  started_at?: string | null;
+  stopped_at?: string | null;
+}
+
+export interface TraderInfoSource {
+  id: string;
+  trader_id: string;
+  source_type: string;
+  name: string;
+  config_json?: string | null;
+  enabled: boolean;
+  created_at: string;
+  updated_at: string;
+}
+
+export interface CreateTraderInfoSourceRequest {
+  source_type: string;
+  name: string;
+  config_json?: string | null;
+  enabled?: boolean | null;
+}
+
+export interface CreateTraderRequest {
+  name: string;
+  fundamental_perspective: string;
+  freedom_level: TraderFreedomLevel;
+  default_paper_account_id?: string | null;
+  openai_api_key: string;
+  info_sources: CreateTraderInfoSourceRequest[];
+}
+
+export interface UpdateTraderRequest {
+  name?: string;
+  fundamental_perspective?: string;
+  freedom_level?: TraderFreedomLevel;
+  default_paper_account_id?: string | null;
+  openai_api_key?: string;
+  info_sources?: CreateTraderInfoSourceRequest[];
+}
+
+export interface TraderRuntimeState {
+  trader_id: string;
+  engine_name?: string | null;
+  last_heartbeat_at?: string | null;
+  last_evaluation_at?: string | null;
+  last_error?: string | null;
+  current_task?: string | null;
+  created_at: string;
+  updated_at: string;
+}
+
+export interface TraderEvent {
+  id: string;
+  trader_id: string;
+  event_type: string;
+  message: string;
+  payload?: string | null;
+  created_at: string;
+}
+
+export interface TraderTradeProposal {
+  id: string;
+  trader_id: string;
+  symbol: string;
+  side: "buy" | "sell";
+  quantity: number;
+  order_type: string;
+  reason: string;
+  confidence?: number | null;
+  status: string;
+  reviewed_by?: string | null;
+  reviewed_at?: string | null;
+  resulting_order_id?: string | null;
+  created_at: string;
+  updated_at: string;
+}
+
+export interface TraderDetail {
+  trader: Trader;
+  info_sources: TraderInfoSource[];
+  runtime_state?: TraderRuntimeState | null;
+  recent_events: TraderEvent[];
+}
+
+export interface TraderEventsResponse {
+  events: TraderEvent[];
+}
+
+export interface TraderTradeProposalsResponse {
+  proposals: TraderTradeProposal[];
+}
+
+export type DataSourceType = "rss" | "web_page" | "manual_note" | "placeholder_api";
+
+export interface DataSource {
+  id: string;
+  name: string;
+  source_type: DataSourceType;
+  url?: string | null;
+  config_json?: string | null;
+  enabled: boolean;
+  poll_interval_seconds: number;
+  last_checked_at?: string | null;
+  last_success_at?: string | null;
+  last_error?: string | null;
+  created_at: string;
+  updated_at: string;
+}
+
+export interface CreateDataSourceRequest {
+  name: string;
+  source_type: DataSourceType;
+  url?: string | null;
+  config_json?: string | null;
+  enabled: boolean;
+  poll_interval_seconds?: number | null;
+}
+
+export interface UpdateDataSourceRequest {
+  name?: string;
+  source_type?: DataSourceType;
+  url?: string | null;
+  config_json?: string | null;
+  enabled?: boolean;
+  poll_interval_seconds?: number | null;
+}
+
+export interface DataSourceItem {
+  id: string;
+  data_source_id: string;
+  external_id?: string | null;
+  title: string;
+  url?: string | null;
+  content?: string | null;
+  summary?: string | null;
+  raw_payload?: string | null;
+  published_at?: string | null;
+  discovered_at: string;
+  created_at: string;
+}
+
+export interface DataSourceEvent {
+  id: string;
+  data_source_id?: string | null;
+  event_type: string;
+  message: string;
+  payload?: string | null;
+  created_at: string;
+}
+
+export interface DataSourceItemsResponse {
+  items: DataSourceItem[];
+}
+
+export interface DataSourceEventsResponse {
+  events: DataSourceEvent[];
+}
+
+export interface TraderDataSourcesResponse {
+  data_sources: DataSource[];
+}
+
+export interface ChatCommandAction {
+  type: string;
+  entity_id?: string | null;
+  message?: string | null;
+}
+
+export interface ChatCommandResponse {
+  reply: string;
+  actions: ChatCommandAction[];
+  handled: boolean;
+  requires_confirmation: boolean;
+  confirmation_token?: string | null;
 }
 
 type RequestOptions = {
@@ -481,6 +700,11 @@ export const deskApi = {
     return request<PaperAccount[]>("/paper/accounts");
   },
 
+  async listLiveAccounts() {
+    // TODO: Replace this stub with a safe metadata-only live account endpoint when available.
+    return [] as LiveAccount[];
+  },
+
   getPaperAccount(accountId: string) {
     return request<PaperAccount>(`/paper/accounts/${encodeURIComponent(accountId)}`);
   },
@@ -508,6 +732,8 @@ export const deskApi = {
     source?: string;
     strategy_id?: string | null;
     signal_id?: string | null;
+    trader_id?: string | null;
+    proposal_id?: string | null;
   }) {
     return request<PaperOrderExecutionResponse>("/paper/orders", {
       method: "POST",
@@ -599,5 +825,142 @@ export const deskApi = {
         method: "POST",
       },
     );
+  },
+
+  createTrader(input: CreateTraderRequest) {
+    return request<Trader>("/traders", { method: "POST", body: input });
+  },
+
+  listTraders() {
+    return request<Trader[]>("/traders");
+  },
+
+  getTrader(traderId: string) {
+    return request<TraderDetail>(`/traders/${encodeURIComponent(traderId)}`);
+  },
+
+  updateTrader(traderId: string, input: UpdateTraderRequest) {
+    return request<Trader>(`/traders/${encodeURIComponent(traderId)}`, {
+      method: "PUT",
+      body: input,
+    });
+  },
+
+  deleteTrader(traderId: string) {
+    return request<void>(`/traders/${encodeURIComponent(traderId)}`, {
+      method: "DELETE",
+    });
+  },
+
+  startTrader(traderId: string) {
+    return request<Trader>(`/traders/${encodeURIComponent(traderId)}/start`, {
+      method: "POST",
+    });
+  },
+
+  stopTrader(traderId: string) {
+    return request<Trader>(`/traders/${encodeURIComponent(traderId)}/stop`, {
+      method: "POST",
+    });
+  },
+
+  pauseTrader(traderId: string) {
+    return request<Trader>(`/traders/${encodeURIComponent(traderId)}/pause`, {
+      method: "POST",
+    });
+  },
+
+  getTraderEvents(traderId: string) {
+    return request<TraderEventsResponse>(
+      `/traders/${encodeURIComponent(traderId)}/events`,
+    );
+  },
+
+  getTraderRuntimeState(traderId: string) {
+    return request<TraderRuntimeState>(
+      `/traders/${encodeURIComponent(traderId)}/runtime-state`,
+    );
+  },
+
+  getTraderTradeProposals(traderId: string) {
+    return request<TraderTradeProposalsResponse>(
+      `/traders/${encodeURIComponent(traderId)}/trade-proposals`,
+    );
+  },
+
+  approveTraderTradeProposal(traderId: string, proposalId: string) {
+    return request<TraderTradeProposal>(
+      `/traders/${encodeURIComponent(traderId)}/trade-proposals/${encodeURIComponent(proposalId)}/approve`,
+      { method: "POST" },
+    );
+  },
+
+  rejectTraderTradeProposal(traderId: string, proposalId: string) {
+    return request<TraderTradeProposal>(
+      `/traders/${encodeURIComponent(traderId)}/trade-proposals/${encodeURIComponent(proposalId)}/reject`,
+      { method: "POST" },
+    );
+  },
+
+  createDataSource(input: CreateDataSourceRequest) {
+    return request<DataSource>("/data-sources", { method: "POST", body: input });
+  },
+
+  listDataSources() {
+    return request<DataSource[]>("/data-sources");
+  },
+
+  getDataSource(sourceId: string) {
+    return request<DataSource>(`/data-sources/${encodeURIComponent(sourceId)}`);
+  },
+
+  updateDataSource(sourceId: string, input: UpdateDataSourceRequest) {
+    return request<DataSource>(`/data-sources/${encodeURIComponent(sourceId)}`, {
+      method: "PUT",
+      body: input,
+    });
+  },
+
+  deleteDataSource(sourceId: string) {
+    return request<void>(`/data-sources/${encodeURIComponent(sourceId)}`, {
+      method: "DELETE",
+    });
+  },
+
+  getDataSourceItems(sourceId: string) {
+    return request<DataSourceItemsResponse>(
+      `/data-sources/${encodeURIComponent(sourceId)}/items`,
+    );
+  },
+
+  getDataSourceEvents(sourceId: string) {
+    return request<DataSourceEventsResponse>(
+      `/data-sources/${encodeURIComponent(sourceId)}/events`,
+    );
+  },
+
+  getTraderDataSources(traderId: string) {
+    return request<TraderDataSourcesResponse>(
+      `/traders/${encodeURIComponent(traderId)}/data-sources`,
+    );
+  },
+
+  updateTraderDataSources(traderId: string, dataSourceIds: string[]) {
+    return request<TraderDataSourcesResponse>(
+      `/traders/${encodeURIComponent(traderId)}/data-sources`,
+      { method: "PUT", body: { data_source_ids: dataSourceIds } },
+    );
+  },
+
+  sendChatCommand(input: {
+    message: string;
+    context?: Record<string, unknown>;
+    confirmation_token?: string | null;
+    confirmed?: boolean;
+  }) {
+    return request<ChatCommandResponse>("/chat/commands", {
+      method: "POST",
+      body: input,
+    });
   },
 };

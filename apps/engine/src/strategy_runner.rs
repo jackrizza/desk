@@ -166,8 +166,10 @@ pub async fn run_strategy(
                     quantity: proposed_order.quantity,
                     requested_price: None,
                     source: Some("engine".to_string()),
+                    trader_id: None,
                     strategy_id: Some(strategy.strategy_id.clone()),
                     signal_id: Some(signal.id.clone()),
+                    proposal_id: None,
                 })
                 .await
                 .map_err(|err| format!("failed to submit enter paper order: {err}"))?;
@@ -262,8 +264,10 @@ pub async fn run_strategy(
                         quantity,
                         requested_price: None,
                         source: Some("engine".to_string()),
+                        trader_id: None,
                         strategy_id: Some(strategy.strategy_id.clone()),
                         signal_id: Some(signal.id.clone()),
+                        proposal_id: None,
                     })
                     .await
                     .map_err(|err| format!("failed to submit exit paper order: {err}"))?;

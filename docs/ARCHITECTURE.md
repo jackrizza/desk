@@ -128,6 +128,7 @@ The chat layer:
 - keeps per-page chat history
 - can call OpenAI through the browser when a key is present
 - uses page-aware instructions for market, portfolio, and project contexts
+- sends management commands to `openapi` before falling back to normal chat behavior
 
 ## Persistence Model
 
@@ -147,3 +148,54 @@ Current persistence is split like this:
 - `openapi` persists active symbols, heartbeat history, and engine event history for monitoring and audit trails
 - strategy-driven paper trading continues after the browser closes because execution config, risk config, runtime state, and signals all live behind `openapi`
 - future order intent and live-trading logic can build on those persisted histories
+
+# Chat Command Architecture
+
+Chat-driven management for Traders and Data Sources is executed through `openapi`, not through
+frontend-only parsing. The frontend sends candidate management messages to `POST /api/chat/commands`;
+if the backend marks the message as handled, the chat renders the backend reply and refreshes the
+relevant Trader/Data Source state. If the backend does not recognize a command, the existing normal
+chat path continues.
+
+V1 command parsing uses deterministic backend patterns first, then an optional backend OpenAI parser
+when `CHAT_COMMAND_OPENAI_API_KEY` or `OPENAI_API_KEY` is configured. It is scoped to supported
+management phrases for:
+- Traders: create, update, list, start, stop, pause, delete, and status.
+- Data Sources: create, update, list, disable/delete, and recent item/status checks.
+- Trader/Data Source relationships: assign, unassign, and list assigned sources.
+
+Sensitive commands use a confirmation token returned by `openapi`; the frontend stores only that
+pending token in chat state and sends it back when the user confirms. Deleting Traders or Data
+Sources, promoting a Trader to `senior_trader`, and starting a senior Trader require confirmation.
+
+Trader API keys are not requested in general chat. Chat-created Traders use a backend default key
+from `CHAT_DEFAULT_OPENAI_API_KEY` or `OPENAI_API_KEY` when present; otherwise the user is told to
+add the key through the write-only Trader form. Saved keys are never returned through chat responses.
+# Trader Architecture
+
+Trader is an engine-resident autonomous paper-trading feature. The browser creates and manages Trader records, then the engine continues polling `/engine/config/traders` and evaluating running Traders even after the web app closes.
+
+Freedom levels are enforced in the engine:
+- `analyst` records recommendations/events only.
+- `junior_trader` creates pending trade proposals that require UI approval.
+- `senior_trader` may submit paper orders only, and never live broker orders.
+
+Trader API keys are handed to OpenAPI only during create/update and stored server-side in `trader_secrets`. Public Trader endpoints do not return secrets. V1 stores the secret through a database-backed abstraction with a TODO for encryption or Key Vault/secret manager integration.
+
+Junior review flow: the engine creates `trader_trade_proposals`; the UI approve action submits a paper order with `source = trader`, `trader_id`, and `proposal_id`, then marks the proposal executed. Reject marks the proposal rejected.
+
+Senior execution is paper-only. Trader-specific risk configuration is a future extension; v1 keeps conservative behavior and relies on selected paper account checks such as cash and position validation.
+
+# Scrapper
+
+`scrapper` is a Dockerized Rust background service for trader information gathering. It runs independently from the browser, polls enabled data sources every 30 seconds by default, and stores discovered items in a dedicated `scrapper` Postgres schema.
+
+OpenAPI owns the REST surface for data source CRUD and trader-source assignment. The frontend never talks directly to `scrapper`; it writes source configuration through OpenAPI, and the `scrapper` worker reads the same schema.
+
+V1 source types:
+- `rss`: fetches RSS-like feeds and stores new items by guid/link/hash.
+- `web_page`: fetches a page and stores a new item when the body hash changes.
+- `manual_note`: saved configuration/content only; no external polling.
+- `placeholder_api`: saved config only for future external APIs.
+
+Trader engine config includes assigned data source metadata so trader prompts can include source context. Recent item consumption can be expanded through OpenAPI without requiring the web app to remain open.

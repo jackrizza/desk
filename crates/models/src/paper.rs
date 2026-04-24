@@ -26,6 +26,23 @@ pub struct PaperPosition {
 }
 
 #[derive(Object, Serialize, Deserialize, Clone, Debug, Default)]
+pub struct PaperPositionSummary {
+    pub id: String,
+    pub account_id: String,
+    pub symbol: String,
+    pub quantity: f64,
+    pub average_price: f64,
+    pub current_price: Option<f64>,
+    pub market_value: Option<f64>,
+    pub cost_basis: f64,
+    pub unrealized_gain: f64,
+    pub unrealized_gain_percent: f64,
+    pub realized_pnl: f64,
+    pub created_at: String,
+    pub updated_at: String,
+}
+
+#[derive(Object, Serialize, Deserialize, Clone, Debug, Default)]
 pub struct PaperOrder {
     pub id: String,
     pub account_id: String,
@@ -38,8 +55,10 @@ pub struct PaperOrder {
     pub average_fill_price: Option<f64>,
     pub status: String,
     pub source: String,
+    pub trader_id: Option<String>,
     pub strategy_id: Option<String>,
     pub signal_id: Option<String>,
+    pub proposal_id: Option<String>,
     pub created_at: String,
     pub updated_at: String,
 }
@@ -82,17 +101,23 @@ pub struct CreatePaperOrderRequest {
     pub quantity: f64,
     pub requested_price: Option<f64>,
     pub source: Option<String>,
+    pub trader_id: Option<String>,
     pub strategy_id: Option<String>,
     pub signal_id: Option<String>,
+    pub proposal_id: Option<String>,
 }
 
 #[derive(Object, Serialize, Deserialize, Clone, Debug, Default)]
 pub struct PaperAccountSummaryResponse {
     pub account: PaperAccount,
-    pub positions: Vec<PaperPosition>,
+    pub positions: Vec<PaperPositionSummary>,
     pub open_orders: Vec<PaperOrder>,
     pub recent_fills: Vec<PaperFill>,
     pub equity_estimate: f64,
+    pub total_cost_basis: f64,
+    pub total_market_value: f64,
+    pub total_unrealized_gain: f64,
+    pub total_unrealized_gain_percent: f64,
 }
 
 #[derive(Object, Serialize, Deserialize, Clone, Debug, Default)]

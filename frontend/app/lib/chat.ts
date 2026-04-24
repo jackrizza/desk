@@ -4,6 +4,9 @@ import {
   OPENAI_DEFAULT_MODEL,
   OPENAI_SETTINGS_CHANGE_EVENT,
 } from "./openai";
+import { deskApi, type ChatCommandResponse } from "./api";
+
+export const CHAT_COMMAND_EXECUTED_EVENT = "desk-chat-command-executed";
 
 export type ChatMessage = {
   id: string;
@@ -42,16 +45,30 @@ export type ChatContext =
       dayHigh: number | null;
       dayLow: number | null;
     }
-  | {
-      page: "project";
-      projectId: string;
-      projectName: string | null;
-      description: string | null;
-      symbols: string[];
-      interval: string | null;
-      range: string | null;
-      prepost: boolean | null;
-    };
+	  | {
+	      page: "project";
+	      projectId: string;
+	      projectName: string | null;
+	      description: string | null;
+	      symbols: string[];
+	      interval: string | null;
+	      range: string | null;
+	      prepost: boolean | null;
+	    }
+	  | {
+	      page: "traders";
+	      traderCount: number;
+	      runningCount: number;
+	      selectedTraderName: string | null;
+	      selectedTraderStatus: string | null;
+	    }
+	  | {
+	      page: "data_sources";
+	      sourceCount: number;
+	      enabledCount: number;
+	      selectedSourceName: string | null;
+	      selectedSourceType: string | null;
+	    };
 
 function createId() {
   return `msg-${Date.now().toString(36)}-${Math.random().toString(36).slice(2, 8)}`;
@@ -75,11 +92,15 @@ function createWelcomeMessage(page: ChatContext["page"]) {
 }
 
 function getWelcomeMessage(page: ChatContext["page"]) {
-  return page === "home"
-    ? "Portfolio assistant is live. Ask about NAV, gain, portfolio scope, strategies, or positions on this dashboard."
-    : page === "market"
-      ? "Market assistant is live. Ask about the active symbol, range, interval, last close, or chart state on this screen."
-      : "Strategy assistant is live. Describe the trading pattern you want and I will help turn it into a rules-based idea for this project.";
+	  return page === "home"
+	    ? "Portfolio assistant is live. Ask about NAV, gain, portfolio scope, strategies, or positions on this dashboard."
+	    : page === "market"
+	      ? "Market assistant is live. Ask about the active symbol, range, interval, last close, or chart state on this screen."
+	      : page === "project"
+	        ? "Strategy assistant is live. Describe the trading pattern you want and I will help turn it into a rules-based idea for this project."
+	        : page === "traders"
+	          ? "Trader assistant is live. You can create, edit, list, start, stop, or assign sources to Traders."
+	          : "Data Source assistant is live. You can create, edit, list, disable, or inspect polling sources.";
 }
 
 function formatCurrency(value: number) {
@@ -192,6 +213,35 @@ function buildProjectReply(input: string, context: Extract<ChatContext, { page: 
   return `I can help design an algorithmic pattern for ${projectName} using ${symbolList}. Describe the setup you want, and I can turn it into structured rules for signals, filters, entries, exits, and risk.`;
 }
 
+function buildTradersReply(input: string, context: Extract<ChatContext, { page: "traders" }>) {
+  const normalized = input.toLowerCase();
+  if (normalized.includes("running")) {
+    return `${context.runningCount} of ${context.traderCount} traders are running.`;
+  }
+  if (normalized.includes("selected") || normalized.includes("current")) {
+    return context.selectedTraderName
+      ? `${context.selectedTraderName} is ${context.selectedTraderStatus ?? "unknown"}.`
+      : "No trader is selected.";
+  }
+  return `I can manage Traders from chat. Try: "Create an analyst trader named Macro Scout" or "Start Macro Scout."`;
+}
+
+function buildDataSourcesReply(
+  input: string,
+  context: Extract<ChatContext, { page: "data_sources" }>,
+) {
+  const normalized = input.toLowerCase();
+  if (normalized.includes("enabled")) {
+    return `${context.enabledCount} of ${context.sourceCount} data sources are enabled.`;
+  }
+  if (normalized.includes("selected") || normalized.includes("current")) {
+    return context.selectedSourceName
+      ? `${context.selectedSourceName} is a ${context.selectedSourceType ?? "unknown"} source.`
+      : "No data source is selected.";
+  }
+  return `I can manage Data Sources from chat. Try: "Add an RSS data source called Fed News using https://..."`;
+}
+
 function buildProjectOutlineLocally(
   rawReply: string,
   context: Extract<ChatContext, { page: "project" }>,
@@ -214,11 +264,19 @@ async function buildAssistantReply(input: string, context: ChatContext) {
     return buildHomeReply(input, context);
   }
 
-  if (context.page === "market") {
-    return buildMarketReply(input, context);
-  }
+	if (context.page === "market") {
+	    return buildMarketReply(input, context);
+	  }
 
-  return buildProjectReply(input, context);
+	  if (context.page === "project") {
+	    return buildProjectReply(input, context);
+	  }
+
+	  if (context.page === "traders") {
+	    return buildTradersReply(input, context);
+	  }
+
+	  return buildDataSourcesReply(input, context);
 }
 
 async function buildProjectOutlineReply(
@@ -293,7 +351,7 @@ function buildDeveloperInstruction(context: ChatContext) {
     ].join(" ");
   }
 
-  if (context.page === "project") {
+	  if (context.page === "project") {
     return [
       "You are Desk, a strategy-building assistant embedded in a project workspace for algorithmic trading.",
       "Help the user turn freeform ideas into concrete trading rules.",
@@ -302,7 +360,23 @@ function buildDeveloperInstruction(context: ChatContext) {
       `Project description: ${context.description ?? "none"}.`,
       "Do not claim backtesting results you do not have. If the user asks for code, produce concise pseudocode or implementation-ready rule logic.",
     ].join(" ");
-  }
+	  }
+
+	  if (context.page === "traders") {
+	    return [
+	      "You are Desk, a Trader management assistant embedded in a trading application.",
+	      "Help the user manage Traders through concise answers. Do not request API keys in general chat.",
+	      `Trader context: ${context.traderCount} traders, ${context.runningCount} running, selected trader ${context.selectedTraderName ?? "none"}, selected status ${context.selectedTraderStatus ?? "none"}.`,
+	    ].join("\n");
+	  }
+
+	  if (context.page === "data_sources") {
+	    return [
+	      "You are Desk, a Data Source management assistant embedded in a trading application.",
+	      "Help the user manage data sources through concise answers.",
+	      `Data Source context: ${context.sourceCount} sources, ${context.enabledCount} enabled, selected source ${context.selectedSourceName ?? "none"}, selected type ${context.selectedSourceType ?? "none"}.`,
+	    ].join("\n");
+	  }
 
   return [
     "You are Desk, a market assistant embedded in a stock chart view.",
@@ -396,9 +470,16 @@ function getStorageKey(context: ChatContext) {
     return `desk-chat-history-project-${context.projectId}`;
   }
 
-  return context.page === "market"
-    ? "desk-chat-history-market"
-    : "desk-chat-history-home";
+	  if (context.page === "market") {
+	    return "desk-chat-history-market";
+	  }
+	  if (context.page === "traders") {
+	    return "desk-chat-history-traders";
+	  }
+	  if (context.page === "data_sources") {
+	    return "desk-chat-history-data-sources";
+	  }
+	  return "desk-chat-history-home";
 }
 
 function loadMessages(context: ChatContext) {
@@ -420,12 +501,14 @@ function loadMessages(context: ChatContext) {
 }
 
 export function useDeskChat(context: ChatContext) {
-  const storageKey = useMemo(() => getStorageKey(context), [context]);
+  const storageKey = getStorageKey(context);
   const [messages, setMessages] = useState<ChatMessage[]>(() => [
     createWelcomeMessage(context.page),
   ]);
   const [pending, setPending] = useState(false);
   const [apiKeyAvailable, setApiKeyAvailable] = useState(Boolean(getStoredOpenAIApiKey()));
+  const [pendingConfirmation, setPendingConfirmation] =
+    useState<ChatCommandResponse | null>(null);
   const contextRef = useRef(context);
 
   useEffect(() => {
@@ -433,7 +516,10 @@ export function useDeskChat(context: ChatContext) {
   }, [context]);
 
   useEffect(() => {
-    setMessages(loadMessages(context));
+    const nextMessages = loadMessages(context);
+    setMessages((current) =>
+      JSON.stringify(current) === JSON.stringify(nextMessages) ? current : nextMessages,
+    );
   }, [storageKey]);
 
   useEffect(() => {
@@ -460,8 +546,8 @@ export function useDeskChat(context: ChatContext) {
 
   const suggestions = useMemo(
     () =>
-      context.page === "home"
-        ? [
+	      context.page === "home"
+	        ? [
             "What is the scoped NAV?",
             "How many open positions do I have?",
             "What portfolios are in scope?",
@@ -472,11 +558,23 @@ export function useDeskChat(context: ChatContext) {
             "What range and interval am I using?",
             "What are the visible highs and lows?",
           ]
-          : [
-            "Build a mean reversion strategy for this project",
-            "Turn this idea into entry and exit rules",
-            "What filters should I use for these symbols?",
-          ],
+	          : context.page === "project"
+	            ? [
+	            "Build a mean reversion strategy for this project",
+	            "Turn this idea into entry and exit rules",
+	            "What filters should I use for these symbols?",
+	          ]
+	            : context.page === "traders"
+	              ? [
+	                  "Show all running traders",
+	                  "Create an analyst trader named Macro Scout",
+	                  "Stop Macro Scout",
+	                ]
+	              : [
+	                  "Show all data sources",
+	                  "Add an RSS data source called Fed News using https://www.federalreserve.gov/feeds/press_all.xml",
+	                  "Show recent items from Fed News",
+	                ],
     [context.page],
   );
 
@@ -492,6 +590,63 @@ export function useDeskChat(context: ChatContext) {
     setPending(true);
 
     try {
+      if (pendingConfirmation && /^(yes|y|confirm|confirmed|do it)$/i.test(trimmed)) {
+        const commandReply = await deskApi.sendChatCommand({
+          message: trimmed,
+          context: {
+            active_page: contextRef.current.page,
+          },
+          confirmation_token: pendingConfirmation.confirmation_token,
+          confirmed: true,
+        });
+        setPendingConfirmation(null);
+        if (commandReply.handled) {
+          window.dispatchEvent(
+            new CustomEvent(CHAT_COMMAND_EXECUTED_EVENT, {
+              detail: commandReply,
+            }),
+          );
+          setMessages((current) => [
+            ...current,
+            createMessage("assistant", commandReply.reply),
+          ]);
+          return;
+        }
+      }
+
+      if (pendingConfirmation && /^(no|n|cancel|stop)$/i.test(trimmed)) {
+        setPendingConfirmation(null);
+        setMessages((current) => [
+          ...current,
+          createMessage("assistant", "Cancelled the pending command."),
+        ]);
+        return;
+      }
+
+      const commandReply = await deskApi.sendChatCommand({
+        message: trimmed,
+        context: {
+          active_page: contextRef.current.page,
+        },
+      });
+      if (commandReply.handled) {
+        if (commandReply.requires_confirmation) {
+          setPendingConfirmation(commandReply);
+        } else {
+          setPendingConfirmation(null);
+          window.dispatchEvent(
+            new CustomEvent(CHAT_COMMAND_EXECUTED_EVENT, {
+              detail: commandReply,
+            }),
+          );
+        }
+        setMessages((current) => [
+          ...current,
+          createMessage("assistant", commandReply.reply),
+        ]);
+        return;
+      }
+
       const apiKey = getStoredOpenAIApiKey();
       const rawReply = apiKey
         ? await buildOpenAIReply(trimmed, contextRef.current, nextHistory, apiKey)

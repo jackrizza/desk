@@ -63,6 +63,24 @@ services:
     volumes:
       - openapi_cache:/app/cache_data
 
+  scrapper:
+    build:
+      context: .
+      dockerfile: apps/scrapper/Dockerfile
+    container_name: desk-scrapper
+    restart: unless-stopped
+    depends_on:
+      postgres:
+        condition: service_healthy
+      openapi:
+        condition: service_healthy
+    environment:
+      SCRAPPER_NAME: ${SCRAPPER_NAME:-scrapper-1}
+      SCRAPPER_DATABASE_URL: postgres://${POSTGRES_USER:-desk}:${POSTGRES_PASSWORD:-desk}@postgres:5432/${POSTGRES_DB:-desk}
+      OPENAPI_BASE_URL: ${OPENAPI_BASE_URL:-http://openapi:3000/api}
+      SCRAPPER_POLL_INTERVAL_SECONDS: ${SCRAPPER_POLL_INTERVAL_SECONDS:-30}
+      RUST_LOG: ${RUST_LOG:-info}
+
   frontend:
     build:
       context: ./frontend
@@ -73,6 +91,8 @@ services:
       openapi:
         condition: service_healthy
       engine:
+        condition: service_started
+      scrapper:
         condition: service_started
     environment:
       VITE_DEV_PROXY_TARGET: http://openapi:3000

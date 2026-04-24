@@ -151,6 +151,31 @@ Then validate:
 
 The frontend currently calls OpenAI directly when an API key is saved in local storage. This is okay for local development, but production should move model access behind the backend.
 
+### Chat command workflow
+
+Management commands are sent to `POST /api/chat/commands` before normal chat fallback. Useful local
+smoke tests:
+
+```text
+Create an analyst trader named Macro Scout focused on cautious macro trading.
+Add an RSS data source called Fed News using https://www.federalreserve.gov/feeds/press_all.xml
+Assign Fed News to Macro Scout.
+Start Macro Scout.
+Show all running traders.
+Delete Macro Scout.
+yes
+```
+
+The backend returns `handled = false` for ordinary explanatory chat so existing chat behavior still
+works. It uses deterministic command patterns first, then the optional backend OpenAI parser when
+`CHAT_COMMAND_OPENAI_API_KEY` or `OPENAI_API_KEY` is configured. Set `CHAT_COMMAND_MODEL` to override
+the default parser model. For destructive or sensitive commands, it returns a confirmation token;
+reply with `yes` to execute or `no` to cancel.
+
+Do not paste Trader API keys into general chat. Chat-created Traders use `CHAT_DEFAULT_OPENAI_API_KEY`
+or `OPENAI_API_KEY` on the backend when available, otherwise the write-only Trader form should be used
+to add or replace the saved key.
+
 ## Risk Controls Notes
 
 - Risk checks run in the engine before paper order submission.
@@ -164,3 +189,35 @@ The frontend currently calls OpenAI directly when an API key is saved in local s
 - move OpenAI calls to the backend
 - add automated tests around project strategy persistence and backtest preparation
 - add database migration management if schema changes start growing beyond simple startup migration
+# Trader Development Notes
+
+Run the normal validation flow after Trader changes:
+
+```bash
+cargo fmt
+cargo check --workspace
+cd frontend
+npm run build
+docker compose up --build
+```
+
+Manual checks:
+- Create a Trader with a write-only OpenAI API key.
+- Confirm list/detail responses do not include the key.
+- Start, pause, stop, edit, and soft-delete the Trader.
+- Close the browser and confirm engine logs/runtime state continue updating for running Traders.
+- Confirm analysts only create events, junior Traders create pending proposals, and senior Traders only attempt paper orders with a selected paper account.
+
+V1 security limitation: `trader_secrets` is database-backed and not encrypted yet. Add encryption or a dedicated secret manager before using beyond local development.
+
+## Scrapper
+
+`apps/scrapper` is part of the Rust workspace and starts from Docker Compose as `desk-scrapper`. It uses `SCRAPPER_DATABASE_URL` and creates/uses the `scrapper` schema in the existing Postgres database.
+
+Manual validation:
+- Create an RSS or web page data source from `/data-sources`.
+- Wait at least 30 seconds.
+- Confirm `scrapper` logs show polling and OpenAPI shows updated `last_checked_at`.
+- Open a Trader and assign data sources from the Data Sources section.
+- Refresh the browser and confirm assignments persist.
+- Confirm `/api/engine/config/traders` includes assigned data source metadata.
