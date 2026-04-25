@@ -1,4 +1,7 @@
-pub use models::channels::{ChannelMessage, CreateChannelMessageRequest, EngineChannelContext};
+pub use models::channels::{
+    ChannelMessage, CreateChannelMessageRequest, CreateTraderMemoryRequest, EngineChannelContext,
+    TraderMemory,
+};
 pub use models::trader::{
     CreateTraderEventRequest, CreateTraderPortfolioProposalActionRequest,
     CreateTraderPortfolioProposalRequest, CreateTraderTradeProposalRequest, EngineRunnableTrader,
@@ -46,6 +49,15 @@ pub struct TraderAiPortfolioProposalAction {
     pub enact_by: Option<String>,
     pub market_price_at_creation: Option<f64>,
     pub rationale: String,
+    pub confidence: Option<f64>,
+}
+
+#[derive(Clone, Debug, Deserialize)]
+pub struct TraderMemoryDraft {
+    pub topic: String,
+    pub summary: String,
+    pub memory_type: String,
+    pub importance: Option<i64>,
     pub confidence: Option<f64>,
 }
 

@@ -2,8 +2,8 @@ use models::engine::{ActiveSymbolsResponse, EngineHealthResponse};
 use models::{
     channels::{
         Channel, ChannelMessage, ChannelMessagesResponse, DataScientistChatResponse,
-        DataScientistProfile, EngineChannelContext, MdChatResponse, MdProfile, TraderPersona,
-        UserInvestorProfile,
+        DataScientistProfile, EngineChannelContext, MdChatResponse, MdProfile, TraderMemory,
+        TraderMemorySearchResponse, TraderPersona, UserInvestorProfile,
     },
     chat_commands::ChatCommandResponse,
     data_sources::{
@@ -221,6 +221,36 @@ pub enum TraderPersonaApiResponse {
     Ok(Json<TraderPersona>),
     #[oai(status = 404)]
     NotFound(Json<ErrorBody>),
+    #[oai(status = 500)]
+    InternalError(Json<ErrorBody>),
+}
+
+#[derive(ApiResponse)]
+pub enum TraderMemoriesApiResponse {
+    #[oai(status = 200)]
+    Ok(Json<Vec<TraderMemory>>),
+    #[oai(status = 500)]
+    InternalError(Json<ErrorBody>),
+}
+
+#[derive(ApiResponse)]
+pub enum TraderMemoryApiResponse {
+    #[oai(status = 200)]
+    Ok(Json<TraderMemory>),
+    #[oai(status = 201)]
+    Created(Json<TraderMemory>),
+    #[oai(status = 400)]
+    BadRequest(Json<ErrorBody>),
+    #[oai(status = 404)]
+    NotFound(Json<ErrorBody>),
+    #[oai(status = 500)]
+    InternalError(Json<ErrorBody>),
+}
+
+#[derive(ApiResponse)]
+pub enum TraderMemorySearchApiResponse {
+    #[oai(status = 200)]
+    Ok(Json<TraderMemorySearchResponse>),
     #[oai(status = 500)]
     InternalError(Json<ErrorBody>),
 }

@@ -8,6 +8,26 @@ The backend is served by the `openapi` crate and exposes routes under `/api`.
 
 Simple health/demo endpoint.
 
+## Trader Memories
+
+Trader memories persist short, actionable lessons from answered channel questions,
+reviews, user preferences, and decisions. They are app context only and never execute
+trades.
+
+Endpoints:
+
+- `GET /api/traders/:trader_id/memories`
+- `POST /api/traders/:trader_id/memories`
+- `PUT /api/traders/:trader_id/memories/:memory_id`
+- `DELETE /api/traders/:trader_id/memories/:memory_id`
+- `POST /api/traders/:trader_id/memories/search`
+- `POST /api/engine/traders/:trader_id/memories`
+- `POST /api/engine/traders/:trader_id/memories/:memory_id/mark-used`
+
+`GET` supports `status`, `memory_type`, and `topic` filters. `DELETE` soft-archives
+the memory by setting `status = archived`. Search is v1 text matching over topic and
+summary; there is no vector database.
+
 ## Market Data
 
 ### `GET /api/stock_data`
@@ -457,8 +477,14 @@ runtime state, and linked paper orders/fills.
 The endpoint uses the Trader's saved OpenAI key when available, then backend defaults. It never
 returns API keys.
 
-Trader chat is conversational only in v1. It cannot place, approve, submit, or execute trades.
-Paper execution remains limited to the engine/review/risk-controlled workflows.
+Trader chat can create or revise draft portfolio proposals when the user directly asks the Trader to
+make/update a proposal. The backend converts the conversation into a structured
+`trader_portfolio_proposals` row with proposed actions and returns a
+`portfolio_proposal_created` action so the UI refreshes. Creating a chat proposal supersedes older
+`proposed` proposals for that Trader, matching the existing proposal workflow.
+
+Trader chat cannot place, approve, submit, or execute trades. Paper execution remains limited to the
+engine/review/risk-controlled workflows.
 
 ## Chat Targets
 

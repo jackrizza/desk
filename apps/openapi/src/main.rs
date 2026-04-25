@@ -10,9 +10,10 @@ use models::paper::{CreatePaperAccountRequest, CreatePaperOrderRequest};
 use models::raw::{RawStockData, StockIndicatorsResponse};
 use models::{
     channels::{
-        CreateChannelMessageRequest, CreateUserChannelMessageRequest, DataScientistChatRequest,
-        MdChatRequest, TraderPersonaUpdateRequest, UpdateDataScientistProfileRequest,
-        UpdateMdProfileRequest, UpdateUserInvestorProfileRequest,
+        CreateChannelMessageRequest, CreateTraderMemoryRequest, CreateUserChannelMessageRequest,
+        DataScientistChatRequest, MdChatRequest, TraderMemorySearchRequest,
+        TraderPersonaUpdateRequest, UpdateDataScientistProfileRequest, UpdateMdProfileRequest,
+        UpdateTraderMemoryRequest, UpdateUserInvestorProfileRequest,
     },
     portfolio::{Portfolio, Position},
     projects::Project,
@@ -85,6 +86,7 @@ use helpers::{
     ListPositionsResponse, ListProjectsResponse, ListTradersResponse, MdChatApiResponse,
     MdProfileApiResponse, PaperAccountSummaryApiResponse, StrategyRiskMutationResponse,
     SuggestTraderSymbolsApiResponse, TraderChatApiResponse, TraderDataSourcesApiResponse,
+    TraderMemoriesApiResponse, TraderMemoryApiResponse, TraderMemorySearchApiResponse,
     TraderMutationResponse, TraderPersonaApiResponse, TraderPortfolioProposalApiResponse,
     TraderPortfolioProposalsApiResponse, TraderSymbolMutationResponse, TraderSymbolsApiResponse,
     TraderTradeProposalMutationResponse, UpdateDataSourceResponse, UpdateDataSourceScriptResponse,
@@ -1101,6 +1103,131 @@ impl Api {
     }
 
     #[oai(
+        path = "/traders/:trader_id/memories",
+        method = "get",
+        tag = "ApiTags::Trader"
+    )]
+    async fn list_trader_memories(
+        &self,
+        trader_id: Path<String>,
+        status: Query<Option<String>>,
+        memory_type: Query<Option<String>>,
+        topic: Query<Option<String>>,
+    ) -> TraderMemoriesApiResponse {
+        match channels::list_trader_memories(
+            &self.database,
+            &trader_id.0,
+            status.0.as_deref(),
+            memory_type.0.as_deref(),
+            topic.0.as_deref(),
+        )
+        .await
+        {
+            Ok(memories) => TraderMemoriesApiResponse::Ok(Json(memories)),
+            Err(err) => TraderMemoriesApiResponse::InternalError(error_message(err.message)),
+        }
+    }
+
+    #[oai(
+        path = "/traders/:trader_id/memories",
+        method = "post",
+        tag = "ApiTags::Trader"
+    )]
+    async fn create_trader_memory(
+        &self,
+        trader_id: Path<String>,
+        request: Json<CreateTraderMemoryRequest>,
+    ) -> TraderMemoryApiResponse {
+        match channels::create_trader_memory(&self.database, &trader_id.0, request.0).await {
+            Ok(memory) => TraderMemoryApiResponse::Created(Json(memory)),
+            Err(err) => map_trader_memory_error(err),
+        }
+    }
+
+    #[oai(
+        path = "/traders/:trader_id/memories/:memory_id",
+        method = "put",
+        tag = "ApiTags::Trader"
+    )]
+    async fn update_trader_memory(
+        &self,
+        trader_id: Path<String>,
+        memory_id: Path<String>,
+        request: Json<UpdateTraderMemoryRequest>,
+    ) -> TraderMemoryApiResponse {
+        match channels::update_trader_memory(&self.database, &trader_id.0, &memory_id.0, request.0)
+            .await
+        {
+            Ok(memory) => TraderMemoryApiResponse::Ok(Json(memory)),
+            Err(err) => map_trader_memory_error(err),
+        }
+    }
+
+    #[oai(
+        path = "/traders/:trader_id/memories/:memory_id",
+        method = "delete",
+        tag = "ApiTags::Trader"
+    )]
+    async fn archive_trader_memory(
+        &self,
+        trader_id: Path<String>,
+        memory_id: Path<String>,
+    ) -> TraderMemoryApiResponse {
+        match channels::archive_trader_memory(&self.database, &trader_id.0, &memory_id.0).await {
+            Ok(memory) => TraderMemoryApiResponse::Ok(Json(memory)),
+            Err(err) => map_trader_memory_error(err),
+        }
+    }
+
+    #[oai(
+        path = "/traders/:trader_id/memories/search",
+        method = "post",
+        tag = "ApiTags::Trader"
+    )]
+    async fn search_trader_memories(
+        &self,
+        trader_id: Path<String>,
+        request: Json<TraderMemorySearchRequest>,
+    ) -> TraderMemorySearchApiResponse {
+        match channels::search_trader_memories(&self.database, &trader_id.0, request.0).await {
+            Ok(response) => TraderMemorySearchApiResponse::Ok(Json(response)),
+            Err(err) => TraderMemorySearchApiResponse::InternalError(error_message(err.message)),
+        }
+    }
+
+    #[oai(
+        path = "/engine/traders/:trader_id/memories",
+        method = "post",
+        tag = "ApiTags::Engine"
+    )]
+    async fn engine_create_trader_memory(
+        &self,
+        trader_id: Path<String>,
+        request: Json<CreateTraderMemoryRequest>,
+    ) -> TraderMemoryApiResponse {
+        match channels::create_trader_memory(&self.database, &trader_id.0, request.0).await {
+            Ok(memory) => TraderMemoryApiResponse::Created(Json(memory)),
+            Err(err) => map_trader_memory_error(err),
+        }
+    }
+
+    #[oai(
+        path = "/engine/traders/:trader_id/memories/:memory_id/mark-used",
+        method = "post",
+        tag = "ApiTags::Engine"
+    )]
+    async fn engine_mark_trader_memory_used(
+        &self,
+        trader_id: Path<String>,
+        memory_id: Path<String>,
+    ) -> TraderMemoryApiResponse {
+        match channels::mark_trader_memory_used(&self.database, &trader_id.0, &memory_id.0).await {
+            Ok(memory) => TraderMemoryApiResponse::Ok(Json(memory)),
+            Err(err) => map_trader_memory_error(err),
+        }
+    }
+
+    #[oai(
         path = "/traders/:trader_id/chat",
         method = "post",
         tag = "ApiTags::Trader"
@@ -2070,6 +2197,20 @@ fn map_channel_message_error(err: channels::ChannelApiError) -> CreateChannelMes
         }
         channels::ChannelErrorKind::Internal => {
             CreateChannelMessageResponse::InternalError(error_message(err.message))
+        }
+    }
+}
+
+fn map_trader_memory_error(err: channels::ChannelApiError) -> TraderMemoryApiResponse {
+    match err.kind {
+        channels::ChannelErrorKind::BadRequest => {
+            TraderMemoryApiResponse::BadRequest(error_message(err.message))
+        }
+        channels::ChannelErrorKind::NotFound => {
+            TraderMemoryApiResponse::NotFound(error_message(err.message))
+        }
+        channels::ChannelErrorKind::Internal => {
+            TraderMemoryApiResponse::InternalError(error_message(err.message))
         }
     }
 }

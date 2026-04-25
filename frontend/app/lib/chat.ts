@@ -761,6 +761,13 @@ export function useDeskChat(context: ChatContext) {
               content: message.content,
             })),
         });
+        if (reply.actions.some((action) => action.type === "portfolio_proposal_created")) {
+          window.dispatchEvent(
+            new CustomEvent(CHAT_COMMAND_EXECUTED_EVENT, {
+              detail: reply,
+            }),
+          );
+        }
         setMessages((current) => [
           ...current,
           createMessage("assistant", reply.reply),

@@ -1,6 +1,7 @@
 import { useEffect, useMemo, useRef, useState } from "react";
 import type React from "react";
 import ReactMarkdown from "react-markdown";
+import { Link, useNavigate, useParams } from "react-router";
 import remarkGfm from "remark-gfm";
 import { EmptyState, ErrorInline, LoadingInline } from "../components/AppFeedback";
 import { ChatPanel } from "../components/ChatPanel";
@@ -13,7 +14,6 @@ export default function ChannelsRoute() {
   const [sidebarOpen, setSidebarOpen] = useState(true);
   const [channels, setChannels] = useState<Channel[]>([]);
   const [messages, setMessages] = useState<ChannelMessage[]>([]);
-  const [selectedChannelId, setSelectedChannelId] = useState("");
   const [composer, setComposer] = useState("");
   const [loading, setLoading] = useState(true);
   const [posting, setPosting] = useState(false);
@@ -21,19 +21,20 @@ export default function ChannelsRoute() {
   const [autoScroll, setAutoScroll] = useState(true);
   const [composerHeight, setComposerHeight] = useState(176);
   const [chatOpen, setChatOpen] = usePersistentBoolean(CHAT_OPEN_STORAGE_KEY, false);
+  const navigate = useNavigate();
+  const { channel: channelParam } = useParams();
   const messagesPaneRef = useRef<HTMLDivElement | null>(null);
   const messagesEndRef = useRef<HTMLDivElement | null>(null);
   const composerRef = useRef<HTMLFormElement | null>(null);
 
   const selectedChannel = useMemo(
-    () => channels.find((channel) => channel.id === selectedChannelId) ?? channels[0],
-    [channels, selectedChannelId],
+    () => channels.find((channel) => channel.name === channelParam || channel.id === channelParam) ?? channels[0],
+    [channels, channelParam],
   );
 
   async function loadChannels() {
     const nextChannels = await deskApi.listChannels();
     setChannels(nextChannels);
-    setSelectedChannelId((current) => current || nextChannels[0]?.id || "");
   }
 
   async function loadMessages(channelId = selectedChannel?.id) {
@@ -83,6 +84,20 @@ export default function ChannelsRoute() {
       window.clearInterval(intervalId);
     };
   }, [selectedChannel?.id]);
+
+  useEffect(() => {
+    if (loading || channels.length === 0) {
+      return;
+    }
+    if (!channelParam) {
+      navigate("/channels/general", { replace: true });
+      return;
+    }
+    const matched = channels.some((channel) => channel.name === channelParam || channel.id === channelParam);
+    if (!matched) {
+      navigate(`/channels/${channels[0].name}`, { replace: true });
+    }
+  }, [channelParam, channels, loading, navigate]);
 
   useEffect(() => {
     if (!autoScroll) {
@@ -165,17 +180,16 @@ export default function ChannelsRoute() {
             <h1 className="mb-4 text-lg font-semibold">Channels</h1>
             <div className="space-y-1">
               {channels.map((channel) => (
-                <button
+                <Link
                   key={channel.id}
-                  type="button"
-                  onClick={() => setSelectedChannelId(channel.id)}
                   className={`app-nav-link w-full rounded-md px-3 py-2 text-left ${selectedChannel?.id === channel.id ? "font-semibold" : ""}`}
+                  to={`/channels/${channel.name}`}
                 >
                   <span className="block truncate">{channel.display_name}</span>
                   {channel.description ? (
                     <span className="app-text-muted block truncate text-xs">{channel.description}</span>
                   ) : null}
-                </button>
+                </Link>
               ))}
             </div>
           </aside>
@@ -251,6 +265,8 @@ export default function ChannelsRoute() {
 }
 
 function MessageBubble({ message }: { message: ChannelMessage }) {
+  const renderedMarkdown = enhanceChannelMarkdown(message.content_markdown);
+
   return (
     <article className={`channel-message channel-message--${message.author_type} rounded-lg p-4`}>
       <div className="mb-2 flex flex-wrap items-center gap-2">
@@ -262,8 +278,29 @@ function MessageBubble({ message }: { message: ChannelMessage }) {
         ) : null}
       </div>
       <div className="prose prose-sm max-w-none">
-        <ReactMarkdown remarkPlugins={[remarkGfm]}>
-          {message.content_markdown}
+        <ReactMarkdown
+          remarkPlugins={[remarkGfm]}
+          components={{
+            a: ({ href, children }) => {
+              if (href?.startsWith("#mention-")) {
+                return <span className="font-medium text-blue-600 dark:text-blue-400">{children}</span>;
+              }
+              if (href?.startsWith("/market/")) {
+                return (
+                  <Link className="font-medium text-blue-600 underline-offset-2 hover:underline dark:text-blue-400" to={href}>
+                    {children}
+                  </Link>
+                );
+              }
+              return (
+                <a href={href} className="underline-offset-2 hover:underline">
+                  {children}
+                </a>
+              );
+            },
+          }}
+        >
+          {renderedMarkdown}
         </ReactMarkdown>
       </div>
     </article>
@@ -276,4 +313,87 @@ function formatTimestamp(value: string) {
     return value;
   }
   return date.toLocaleString();
+}
+
+const COMMON_UPPERCASE_WORDS = new Set([
+  "AI",
+  "API",
+  "CEO",
+  "CFO",
+  "COO",
+  "CSV",
+  "ETF",
+  "HTTP",
+  "JSON",
+  "LLM",
+  "MD",
+  "NYSE",
+  "NASDAQ",
+  "PCT",
+  "Q",
+  "QOQ",
+  "SEC",
+  "UI",
+  "URL",
+  "USD",
+  "USER",
+  "YOY",
+]);
+
+function enhanceChannelMarkdown(markdown: string) {
+  const lines = markdown.split("\n");
+  let inFence = false;
+
+  return lines
+    .map((line) => {
+      if (line.trimStart().startsWith("```")) {
+        inFence = !inFence;
+        return line;
+      }
+      if (inFence) {
+        return line;
+      }
+      return enhanceInlineChannelMarkdown(line);
+    })
+    .join("\n");
+}
+
+function enhanceInlineChannelMarkdown(markdown: string) {
+  const protectedParts: string[] = [];
+  const protect = (match: string) => {
+    const token = `\u0000${protectedParts.length}\u0000`;
+    protectedParts.push(match);
+    return token;
+  };
+
+  let next = markdown
+    .replace(/`[^`]*`/g, protect)
+    .replace(/!?\[[^\]]+\]\([^)]+\)/g, protect);
+
+  next = next
+    .replace(/(^|[^\w/])@\[([^\]\n]{1,40})\]/g, (_match, prefix: string, name: string) => {
+      const handle = channelHandle(name);
+      return `${prefix}[@${name}](#mention-${handle})`;
+    })
+    .replace(/(^|[^\w/])@([A-Za-z][A-Za-z0-9_-]{0,39})\b/g, (_match, prefix: string, handle: string) => {
+      return `${prefix}[@${handle}](#mention-${channelHandle(handle)})`;
+    })
+    .replace(
+      /(^|[^\w$@/])(\$?)([A-Z]{1,5})(?=\b)/g,
+      (match: string, prefix: string, marker: string, symbol: string) => {
+        if (!marker && symbol.length < 2) {
+          return match;
+        }
+        if (COMMON_UPPERCASE_WORDS.has(symbol)) {
+          return match;
+        }
+        return `${prefix}[${marker}${symbol}](/market/${encodeURIComponent(symbol)})`;
+      },
+    );
+
+  return next.replace(/\u0000(\d+)\u0000/g, (_match, index: string) => protectedParts[Number(index)] ?? "");
+}
+
+function channelHandle(value: string) {
+  return value.replace(/[^A-Za-z0-9_-]/g, "") || "mention";
 }

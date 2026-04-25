@@ -40,6 +40,24 @@ npm run build
 
 ## Current Development Notes
 
+### Trader memories
+
+Traders persist memories in `trader_memories`. Memories are short, actionable notes
+created manually from the Trader UI or by the engine after an answered channel question.
+Archived memories remain visible in the UI but are ignored by the engine repeat guard.
+
+Useful checks:
+
+```bash
+curl http://localhost:3000/api/traders/TRADER_ID/memories
+
+curl -X POST http://localhost:3000/api/traders/TRADER_ID/memories/search \
+  -H "Content-Type: application/json" \
+  -d '{"query":"sector concentration risk","limit":5}'
+```
+
+The v1 search is simple text search over topic and summary.
+
 ### Strategy workflow
 
 - project chat builds a strategy response
@@ -203,6 +221,8 @@ Manual checks:
   Python Script source is created, the script is saved, the build endpoint is called, and the Data
   Sources UI refreshes.
 - Select a Trader and ask `What is your goal?`.
+- Ask the Trader to create a proposal, provide symbols/risk details if it asks, and confirm the
+  Portfolio Proposals panel refreshes with a new `proposed` plan.
 - Ask why it made its latest proposal and confirm it references known events/proposals when present.
 - Ask it to place a trade and confirm it does not mutate app state.
 

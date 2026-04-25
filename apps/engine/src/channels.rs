@@ -8,7 +8,8 @@ use crate::{
     trader_client::TraderClient,
     trader_types::{
         ChannelMessage, CreateChannelMessageRequest, EngineChannelContext, EngineRunnableTrader,
-        OpenAiMessage, OpenAiTextChatRequest, TraderAiDecision,
+        OpenAiChatRequest, OpenAiMessage, OpenAiResponseFormat, OpenAiTextChatRequest,
+        TraderAiDecision, TraderMemory,
     },
 };
 
@@ -53,6 +54,19 @@ pub async fn maybe_post_trader_message(
     };
     let context = client.fetch_channel_context().await?;
     let channel_name = choose_trader_channel(&reason, decision);
+    let content = build_trader_message(trader, decision, &reason, &context);
+    if config.trader_memory_enabled {
+        if let Some(memory) = find_relevant_memory(trader, &context, &content) {
+            let _ = client.mark_trader_memory_used(&trader.id, &memory.id).await;
+            info!(
+                trader_id = %trader.id,
+                memory_id = %memory.id,
+                repeat_window_minutes = config.trader_memory_repeat_window_minutes,
+                "skipped repetitive trader channel message because memory already covers it"
+            );
+            return Ok(());
+        }
+    }
     if !cooldown_elapsed(
         &context,
         channel_name,
@@ -63,7 +77,6 @@ pub async fn maybe_post_trader_message(
         return Ok(());
     }
 
-    let content = build_trader_message(trader, decision, &reason, &context);
     client
         .post_channel_message(
             channel_name,
@@ -106,6 +119,10 @@ pub async fn maybe_post_trader_answer_followup(
         return Ok(());
     };
 
+    if config.trader_memory_enabled {
+        maybe_create_memory_from_answer(client, trader, &context, question, answer).await;
+    }
+
     let content =
         build_trader_answer_followup_message(client, trader, &context, question, answer).await;
     client
@@ -134,6 +151,54 @@ pub async fn maybe_post_trader_answer_followup(
         question_message_id = %question.id,
         answer_message_id = %answer.id,
         "posted trader channel follow-up"
+    );
+    Ok(())
+}
+
+pub async fn maybe_post_trader_user_reply(
+    config: &EngineConfig,
+    client: &TraderClient,
+    trader: &EngineRunnableTrader,
+) -> Result<()> {
+    if !config.channels_enabled {
+        return Ok(());
+    }
+
+    let context = client.fetch_channel_context().await?;
+    let Some(user_message) = latest_user_message_needing_trader_reply(trader, &context) else {
+        return Ok(());
+    };
+    let Some(channel_name) = channel_name_for_id(&context, &user_message.channel_id) else {
+        return Ok(());
+    };
+
+    let content = build_trader_user_reply_message(client, trader, &context, user_message).await;
+    client
+        .post_channel_message(
+            channel_name,
+            &CreateChannelMessageRequest {
+                author_type: "trader".to_string(),
+                author_id: Some(trader.id.clone()),
+                author_name: Some(trader.name.clone()),
+                role: Some("answer".to_string()),
+                content_markdown: content,
+                metadata_json: serde_json::to_string(&serde_json::json!({
+                    "conversation_kind": "trader_user_reply",
+                    "trigger_message_id": user_message.id,
+                    "trigger_channel_id": user_message.channel_id,
+                    "reply_to_message_id": user_message.id,
+                    "answers_message_id": user_message.id,
+                    "engine_name": config.engine_name,
+                }))
+                .ok(),
+            },
+        )
+        .await?;
+    info!(
+        trader_id = %trader.id,
+        channel_name,
+        user_message_id = %user_message.id,
+        "posted trader reply to user channel mention"
     );
     Ok(())
 }
@@ -257,8 +322,23 @@ fn build_trader_channel_insight(
             .filter(|message| is_answer_to_trader_question(message, trader, question))
             .max_by_key(|message| &message.created_at)
     });
+    let relevant_memories = relevant_trader_memories(
+        trader,
+        context,
+        latest_question.map(|q| q.content_markdown.as_str()),
+    );
 
     let mut lines = Vec::new();
+    if !relevant_memories.is_empty() {
+        lines.push("Relevant trader memories:".to_string());
+        for memory in &relevant_memories {
+            lines.push(format!(
+                "- {}: {}",
+                memory.topic,
+                compact_markdown(&memory.summary)
+            ));
+        }
+    }
     if let Some(question) = latest_question {
         lines.push(format!(
             "Latest own channel question at {} in {}: {}",
@@ -331,6 +411,37 @@ fn latest_answered_question_needing_trader_followup<'a>(
             Some((question, answer))
         })
         .max_by_key(|(question, answer)| (&question.created_at, &answer.created_at))
+}
+
+fn latest_user_message_needing_trader_reply<'a>(
+    trader: &EngineRunnableTrader,
+    context: &'a EngineChannelContext,
+) -> Option<&'a ChannelMessage> {
+    context
+        .recent_messages
+        .iter()
+        .filter(|message| message.author_type == "user")
+        .filter(|message| has_trader_mention(&message.content_markdown, trader))
+        .filter(|message| !trader_has_replied_to_user_message(context, trader, message))
+        .max_by_key(|message| &message.created_at)
+}
+
+fn trader_has_replied_to_user_message(
+    context: &EngineChannelContext,
+    trader: &EngineRunnableTrader,
+    user_message: &ChannelMessage,
+) -> bool {
+    context.recent_messages.iter().any(|message| {
+        message.channel_id == user_message.channel_id
+            && message.created_at > user_message.created_at
+            && message.author_type == "trader"
+            && message.author_id.as_deref() == Some(trader.id.as_str())
+            && (metadata_points_to(message, user_message)
+                || (metadata_string(message, "conversation_kind").as_deref()
+                    == Some("trader_user_reply")
+                    && metadata_string(message, "trigger_message_id").as_deref()
+                        == Some(user_message.id.as_str())))
+    })
 }
 
 fn latest_answer_to_trader_question<'a>(
@@ -420,6 +531,210 @@ fn compact_markdown(value: &str) -> String {
         format!("{}...", &compact[..MAX_LEN])
     } else {
         compact
+    }
+}
+
+fn relevant_trader_memories(
+    trader: &EngineRunnableTrader,
+    context: &EngineChannelContext,
+    query: Option<&str>,
+) -> Vec<TraderMemory> {
+    let query = query.unwrap_or("");
+    let mut memories = context
+        .trader_memories
+        .iter()
+        .filter(|memory| memory.trader_id == trader.id && memory.status == "active")
+        .filter(|memory| query.is_empty() || memory_similarity(memory, query) >= 0.12)
+        .cloned()
+        .collect::<Vec<_>>();
+    memories.sort_by(|a, b| {
+        b.importance
+            .cmp(&a.importance)
+            .then_with(|| b.updated_at.cmp(&a.updated_at))
+    });
+    memories.truncate(5);
+    memories
+}
+
+fn find_relevant_memory<'a>(
+    trader: &EngineRunnableTrader,
+    context: &'a EngineChannelContext,
+    draft: &str,
+) -> Option<&'a TraderMemory> {
+    context
+        .trader_memories
+        .iter()
+        .filter(|memory| memory.trader_id == trader.id && memory.status == "active")
+        .filter(|memory| memory_similarity(memory, draft) >= 0.22)
+        .max_by_key(|memory| (memory.importance, memory.updated_at.clone()))
+}
+
+fn memory_similarity(memory: &TraderMemory, text: &str) -> f64 {
+    let memory_text = format!("{} {}", memory.topic, memory.summary);
+    let memory_terms = important_terms(&memory_text);
+    let text_terms = important_terms(text);
+    if memory_terms.is_empty() || text_terms.is_empty() {
+        return 0.0;
+    }
+    let overlap = memory_terms
+        .iter()
+        .filter(|term| text_terms.contains(term))
+        .count();
+    overlap as f64 / memory_terms.len().min(text_terms.len()).max(1) as f64
+}
+
+fn important_terms(text: &str) -> Vec<String> {
+    let mut terms = text
+        .to_lowercase()
+        .split_whitespace()
+        .map(|term| {
+            term.trim_matches(|ch: char| !ch.is_ascii_alphanumeric())
+                .to_string()
+        })
+        .filter(|term| term.len() >= 5)
+        .filter(|term| {
+            !matches!(
+                term.as_str(),
+                "current"
+                    | "should"
+                    | "would"
+                    | "could"
+                    | "before"
+                    | "after"
+                    | "trader"
+                    | "review"
+                    | "question"
+                    | "latest"
+                    | "evaluation"
+            )
+        })
+        .collect::<Vec<_>>();
+    terms.sort();
+    terms.dedup();
+    terms
+}
+
+async fn maybe_create_memory_from_answer(
+    client: &TraderClient,
+    trader: &EngineRunnableTrader,
+    context: &EngineChannelContext,
+    question: &ChannelMessage,
+    answer: &ChannelMessage,
+) {
+    if context.trader_memories.iter().any(|memory| {
+        memory.trader_id == trader.id
+            && memory.source_message_id.as_deref() == Some(answer.id.as_str())
+    }) {
+        return;
+    }
+    let request = match client
+        .ask_openai_for_memory_draft(
+            &trader.openai_api_key,
+            &build_memory_openai_request(trader, question, answer),
+        )
+        .await
+    {
+        Ok(draft) => crate::trader_types::CreateTraderMemoryRequest {
+            memory_type: normalize_memory_type(&draft.memory_type),
+            topic: draft.topic,
+            summary: draft.summary,
+            source_channel_id: Some(question.channel_id.clone()),
+            source_message_id: Some(answer.id.clone()),
+            confidence: draft.confidence,
+            importance: draft.importance,
+        },
+        Err(err) => {
+            warn!(
+                trader_id = %trader.id,
+                error = %err,
+                "failed to summarize channel answer into memory; using fallback"
+            );
+            fallback_memory_request(question, answer)
+        }
+    };
+    match client.create_trader_memory(&trader.id, &request).await {
+        Ok(memory) => info!(
+            trader_id = %trader.id,
+            memory_id = %memory.id,
+            "created trader memory from channel answer"
+        ),
+        Err(err) => warn!(trader_id = %trader.id, error = %err, "failed to create trader memory"),
+    }
+}
+
+fn build_memory_openai_request(
+    trader: &EngineRunnableTrader,
+    question: &ChannelMessage,
+    answer: &ChannelMessage,
+) -> OpenAiChatRequest {
+    let prompt = format!(
+        r#"Summarize this answered trader question into one durable memory.
+The memory should be short, specific, and actionable.
+Do not include filler.
+Return JSON with topic, summary, memory_type, importance, confidence.
+
+Valid memory_type values: answer, review, decision, user_preference, risk_note, data_note, proposal_note, channel_resolution.
+Importance is 1 to 5. Confidence is 0 to 1.
+
+Trader: {trader_name}
+Question:
+{question}
+
+Answer/review from {answer_author}:
+{answer}"#,
+        trader_name = trader.name,
+        question = question.content_markdown,
+        answer_author = answer.author_name,
+        answer = answer.content_markdown,
+    );
+    OpenAiChatRequest {
+        model: "gpt-4o-mini".to_string(),
+        messages: vec![
+            OpenAiMessage {
+                role: "system".to_string(),
+                content: "Return strict JSON only. Do not give trading instructions.".to_string(),
+            },
+            OpenAiMessage {
+                role: "user".to_string(),
+                content: prompt,
+            },
+        ],
+        response_format: OpenAiResponseFormat {
+            r#type: "json_object".to_string(),
+        },
+    }
+}
+
+fn fallback_memory_request(
+    question: &ChannelMessage,
+    answer: &ChannelMessage,
+) -> crate::trader_types::CreateTraderMemoryRequest {
+    crate::trader_types::CreateTraderMemoryRequest {
+        memory_type: if answer.author_type == "md" {
+            "review".to_string()
+        } else {
+            "answer".to_string()
+        },
+        topic: compact_markdown(&question.content_markdown)
+            .chars()
+            .take(120)
+            .collect(),
+        summary: compact_markdown(&answer.content_markdown)
+            .chars()
+            .take(900)
+            .collect(),
+        source_channel_id: Some(question.channel_id.clone()),
+        source_message_id: Some(answer.id.clone()),
+        confidence: Some(0.75),
+        importance: Some(if answer.author_type == "md" { 4 } else { 3 }),
+    }
+}
+
+fn normalize_memory_type(value: &str) -> String {
+    match value {
+        "answer" | "review" | "decision" | "user_preference" | "risk_note" | "data_note"
+        | "proposal_note" | "channel_resolution" => value.to_string(),
+        _ => "review".to_string(),
     }
 }
 
@@ -530,6 +845,155 @@ Write one concise markdown follow-up as the trader. If the answer resolves the q
             },
         ],
     }
+}
+
+async fn build_trader_user_reply_message(
+    client: &TraderClient,
+    trader: &EngineRunnableTrader,
+    context: &EngineChannelContext,
+    user_message: &ChannelMessage,
+) -> String {
+    match client
+        .ask_openai_for_text_message(
+            &trader.openai_api_key,
+            &build_trader_user_reply_openai_request(trader, context, user_message),
+            "trader user channel reply",
+        )
+        .await
+    {
+        Ok(message) => message,
+        Err(err) => {
+            warn!(
+                trader_id = %trader.id,
+                error = %err,
+                "failed to generate trader user reply with OpenAI; using fallback"
+            );
+            build_fallback_trader_user_reply(user_message)
+        }
+    }
+}
+
+fn build_trader_user_reply_openai_request(
+    trader: &EngineRunnableTrader,
+    context: &EngineChannelContext,
+    user_message: &ChannelMessage,
+) -> OpenAiTextChatRequest {
+    let recent_messages = context
+        .recent_messages
+        .iter()
+        .filter(|message| message.channel_id == user_message.channel_id)
+        .rev()
+        .take(14)
+        .collect::<Vec<_>>()
+        .into_iter()
+        .rev()
+        .map(|message| {
+            format!(
+                "{} {}: {}",
+                message.author_name,
+                message.role,
+                compact_markdown(&message.content_markdown)
+            )
+        })
+        .collect::<Vec<_>>()
+        .join("\n");
+    let memories = relevant_trader_memories(trader, context, Some(&user_message.content_markdown))
+        .iter()
+        .map(|memory| format!("- {}: {}", memory.topic, compact_markdown(&memory.summary)))
+        .collect::<Vec<_>>()
+        .join("\n");
+    let tracked_symbols = trader
+        .tracked_symbols
+        .iter()
+        .map(|symbol| {
+            format!(
+                "{} ({}, status={}, fit={:?}): {}",
+                symbol.symbol,
+                symbol.asset_type,
+                symbol.status,
+                symbol.fit_score,
+                symbol.thesis.as_deref().unwrap_or("no thesis")
+            )
+        })
+        .collect::<Vec<_>>()
+        .join("\n");
+    let user_profile =
+        serde_json::to_string(&context.user_investor_profile).unwrap_or_else(|_| "{}".to_string());
+    let prompt = format!(
+        r#"You are an AI trader replying in a shared channel because the user directly mentioned you.
+
+Trader name: {name}
+Persona: {persona}
+Tone: {tone}
+Communication style: {communication_style}
+Perspective: {perspective}
+Freedom level: {freedom}
+
+User message from {user_name}:
+{user_message}
+
+Tracked symbol universe:
+{tracked_symbols}
+
+Relevant trader memories:
+{memories}
+
+Recent channel context:
+{recent_messages}
+
+User investor profile context:
+{user_profile}
+
+Write one concise markdown answer as {name}. Begin with @{user_handle}. Answer the user's actual request directly from your trader perspective. If the user asks about symbols or entry levels, discuss only your current watchlist/provisional levels when supported by the tracked symbol context; otherwise say what data is missing before naming levels. Do not submit, approve, or execute trades. Do not imply channel chat bypasses risk controls. Do not return JSON."#,
+        name = trader.name,
+        persona = trader.persona.as_deref().unwrap_or("unset"),
+        tone = trader
+            .tone
+            .as_deref()
+            .unwrap_or("professional, concise, analytical"),
+        communication_style = trader
+            .communication_style
+            .as_deref()
+            .unwrap_or("explains uncertainty and asks for help when needed"),
+        perspective = trader.fundamental_perspective,
+        freedom = trader.freedom_level,
+        user_name = user_message.author_name,
+        user_handle = channel_handle(&user_message.author_name),
+        user_message = user_message.content_markdown,
+        tracked_symbols = if tracked_symbols.is_empty() {
+            "none"
+        } else {
+            &tracked_symbols
+        },
+        memories = if memories.is_empty() {
+            "none"
+        } else {
+            &memories
+        },
+        recent_messages = recent_messages,
+        user_profile = user_profile,
+    );
+
+    OpenAiTextChatRequest {
+        model: "gpt-4o-mini".to_string(),
+        messages: vec![
+            OpenAiMessage {
+                role: "system".to_string(),
+                content: "You write only the trader's markdown channel reply. Do not return JSON. Do not trade.".to_string(),
+            },
+            OpenAiMessage {
+                role: "user".to_string(),
+                content: prompt,
+            },
+        ],
+    }
+}
+
+fn build_fallback_trader_user_reply(user_message: &ChannelMessage) -> String {
+    format!(
+        "@{} I saw your question. I need current symbol context before giving specific levels, but I will use this in my next evaluation. Channel discussion is coordination only and does not execute trades.",
+        channel_handle(&user_message.author_name)
+    )
 }
 
 fn build_fallback_trader_followup(answer: &ChannelMessage) -> String {
@@ -664,6 +1128,11 @@ fn build_md_openai_request(
     context: &EngineChannelContext,
     trigger: &ChannelMessage,
 ) -> OpenAiTextChatRequest {
+    let md_mention_handles = md_mention_handles(&context.md_profile.name)
+        .into_iter()
+        .map(|handle| format!("@{handle}"))
+        .collect::<Vec<_>>()
+        .join(", ");
     let recent_messages = context
         .recent_messages
         .iter()
@@ -705,6 +1174,8 @@ fn build_md_openai_request(
 Persona: {persona}
 Tone: {tone}
 Communication style: {communication_style}
+Configured MD name: {md_name}
+Direct mention handles for you: {md_mention_handles}
 
 Trigger message:
 [{trigger_channel}] {trigger_author} {trigger_role}: {trigger_content}
@@ -718,10 +1189,12 @@ Trader personas:
 User investor profile context:
 {user_profile}
 
-Write one concise markdown response as the MD. If the trigger is from a trader, begin the response with @{trigger_handle} so the trader is explicitly tagged. Monitor, question, summarize, reduce drift, and challenge weak assumptions. If the user or trader mentions @MD, answer that request directly. Never place trades, submit orders, approve trades, or imply channel chat can bypass risk controls."#,
+Write one concise markdown response as the MD. If the trigger is from a trader, begin the response with @{trigger_handle} so the trader is explicitly tagged. Monitor, question, summarize, reduce drift, and challenge weak assumptions. If the user or trader mentions any of your direct mention handles, answer that request directly. Never place trades, submit orders, approve trades, or imply channel chat can bypass risk controls."#,
         persona = context.md_profile.persona,
         tone = context.md_profile.tone,
         communication_style = context.md_profile.communication_style,
+        md_name = context.md_profile.name,
+        md_mention_handles = md_mention_handles,
         trigger_channel = channel_label(context, &trigger.channel_id),
         trigger_author = trigger.author_name,
         trigger_handle = channel_handle(&trigger.author_name),
@@ -822,9 +1295,27 @@ fn is_md_trigger(author_type: &str, role: &str, content_markdown: &str, md_name:
 }
 
 fn has_md_mention(content_markdown: &str, md_name: &str) -> bool {
-    contains_mention(content_markdown, "md")
-        || contains_mention(content_markdown, &channel_handle(md_name))
-        || md_name
+    md_mention_handles(md_name)
+        .iter()
+        .any(|handle| contains_mention(content_markdown, handle))
+}
+
+fn md_mention_handles(md_name: &str) -> Vec<String> {
+    let mut handles = vec!["md".to_string(), channel_handle(md_name)];
+    if let Some(first_name) = md_name.split_whitespace().next() {
+        handles.push(channel_handle(first_name));
+    }
+    handles.retain(|handle| !handle.is_empty());
+    handles.sort();
+    handles.dedup();
+    handles
+}
+
+fn has_trader_mention(content_markdown: &str, trader: &EngineRunnableTrader) -> bool {
+    contains_mention(content_markdown, &channel_handle(&trader.name))
+        || contains_mention(content_markdown, &channel_handle(&trader.id))
+        || trader
+            .name
             .split_whitespace()
             .next()
             .map(|first_name| contains_mention(content_markdown, &channel_handle(first_name)))

@@ -97,6 +97,13 @@ async fn run_trader(
             "failed to post trader channel follow-up"
         );
     }
+    if let Err(err) = channels::maybe_post_trader_user_reply(config, client, trader).await {
+        warn!(
+            trader_id = %trader.id,
+            error = %err,
+            "failed to post trader reply to user channel mention"
+        );
+    }
 
     maybe_create_portfolio_proposal(
         config,

@@ -3,9 +3,10 @@ use reqwest::Client;
 
 use crate::trader_types::{
     ChannelMessage, CreateChannelMessageRequest, CreateTraderEventRequest,
-    CreateTraderPortfolioProposalRequest, CreateTraderTradeProposalRequest, EngineChannelContext,
-    EngineRunnableTrader, EngineTraderConfigResponse, OpenAiChatRequest, OpenAiChatResponse,
-    OpenAiTextChatRequest, TraderAiDecision, TraderAiPortfolioProposal,
+    CreateTraderMemoryRequest, CreateTraderPortfolioProposalRequest,
+    CreateTraderTradeProposalRequest, EngineChannelContext, EngineRunnableTrader,
+    EngineTraderConfigResponse, OpenAiChatRequest, OpenAiChatResponse, OpenAiTextChatRequest,
+    TraderAiDecision, TraderAiPortfolioProposal, TraderMemory, TraderMemoryDraft,
     TraderPortfolioProposalDetail, TraderRuntimeState, TraderTradeProposal,
     UpsertTraderRuntimeStateRequest,
 };
@@ -81,6 +82,44 @@ impl TraderClient {
             .json::<ChannelMessage>()
             .await
             .context("failed to deserialize channel message")
+    }
+
+    pub async fn create_trader_memory(
+        &self,
+        trader_id: &str,
+        request: &CreateTraderMemoryRequest,
+    ) -> Result<TraderMemory> {
+        self.http
+            .post(format!(
+                "{}/engine/traders/{}/memories",
+                self.openapi_base_url,
+                urlencoding::encode(trader_id)
+            ))
+            .json(request)
+            .send()
+            .await
+            .context("failed to create trader memory")?
+            .error_for_status()
+            .context("openapi trader memory endpoint returned error status")?
+            .json::<TraderMemory>()
+            .await
+            .context("failed to deserialize trader memory")
+    }
+
+    pub async fn mark_trader_memory_used(&self, trader_id: &str, memory_id: &str) -> Result<()> {
+        self.http
+            .post(format!(
+                "{}/engine/traders/{}/memories/{}/mark-used",
+                self.openapi_base_url,
+                urlencoding::encode(trader_id),
+                urlencoding::encode(memory_id)
+            ))
+            .send()
+            .await
+            .context("failed to mark trader memory used")?
+            .error_for_status()
+            .context("openapi mark memory used endpoint returned error status")?;
+        Ok(())
     }
 
     pub async fn upsert_runtime_state(
@@ -293,6 +332,33 @@ impl TraderClient {
             .map(|choice| choice.message.content.as_str())
             .unwrap_or("{}");
         serde_json::from_str(content).context("failed to parse trader portfolio proposal JSON")
+    }
+
+    pub async fn ask_openai_for_memory_draft(
+        &self,
+        api_key: &str,
+        request: &OpenAiChatRequest,
+    ) -> Result<TraderMemoryDraft> {
+        let response = self
+            .http
+            .post("https://api.openai.com/v1/chat/completions")
+            .bearer_auth(api_key)
+            .json(request)
+            .send()
+            .await
+            .context("failed to call OpenAI for trader memory")?
+            .error_for_status()
+            .context("OpenAI trader memory request returned error status")?
+            .json::<OpenAiChatResponse>()
+            .await
+            .context("failed to deserialize OpenAI memory response")?;
+
+        let content = response
+            .choices
+            .first()
+            .map(|choice| choice.message.content.as_str())
+            .unwrap_or("{}");
+        serde_json::from_str(content).context("failed to parse trader memory JSON")
     }
 
     pub async fn ask_openai_for_md_message(

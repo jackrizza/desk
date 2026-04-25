@@ -370,4 +370,13 @@ pub struct TraderChatResponse {
     pub referenced_events: Vec<String>,
     pub referenced_proposals: Vec<String>,
     pub referenced_orders: Vec<String>,
+    pub actions: Vec<TraderChatAction>,
+}
+
+#[derive(Object, Serialize, Deserialize, Clone, Debug, Default)]
+pub struct TraderChatAction {
+    pub r#type: String,
+    pub entity_id: Option<String>,
+    pub title: Option<String>,
+    pub status: Option<String>,
 }

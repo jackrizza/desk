@@ -374,6 +374,45 @@ export interface TraderPersonaUpdateRequest {
   communication_style?: string | null;
 }
 
+export interface TraderMemory {
+  id: string;
+  trader_id: string;
+  memory_type: string;
+  topic: string;
+  summary: string;
+  source_channel_id?: string | null;
+  source_message_id?: string | null;
+  confidence?: number | null;
+  importance: number;
+  status: string;
+  last_used_at?: string | null;
+  created_at: string;
+  updated_at: string;
+}
+
+export interface CreateTraderMemoryRequest {
+  memory_type: string;
+  topic: string;
+  summary: string;
+  source_channel_id?: string | null;
+  source_message_id?: string | null;
+  confidence?: number | null;
+  importance?: number | null;
+}
+
+export interface UpdateTraderMemoryRequest {
+  memory_type?: string | null;
+  topic?: string | null;
+  summary?: string | null;
+  confidence?: number | null;
+  importance?: number | null;
+  status?: string | null;
+}
+
+export interface TraderMemorySearchResponse {
+  memories: TraderMemory[];
+}
+
 export interface MdProfile {
   id: string;
   name: string;
@@ -766,6 +805,14 @@ export interface TraderChatResponse {
   referenced_events: string[];
   referenced_proposals: string[];
   referenced_orders: string[];
+  actions: TraderChatAction[];
+}
+
+export interface TraderChatAction {
+  type: string;
+  entity_id?: string | null;
+  title?: string | null;
+  status?: string | null;
 }
 
 export interface AgentChatMessage {
@@ -1437,6 +1484,43 @@ export const deskApi = {
       method: "PUT",
       body: input,
     });
+  },
+
+  listTraderMemories(
+    traderId: string,
+    filters: { status?: string; memory_type?: string; topic?: string } = {},
+  ) {
+    return request<TraderMemory[]>(
+      `/traders/${encodeURIComponent(traderId)}/memories${buildQuery(filters)}`,
+    );
+  },
+
+  createTraderMemory(traderId: string, input: CreateTraderMemoryRequest) {
+    return request<TraderMemory>(`/traders/${encodeURIComponent(traderId)}/memories`, {
+      method: "POST",
+      body: input,
+    });
+  },
+
+  updateTraderMemory(traderId: string, memoryId: string, input: UpdateTraderMemoryRequest) {
+    return request<TraderMemory>(
+      `/traders/${encodeURIComponent(traderId)}/memories/${encodeURIComponent(memoryId)}`,
+      { method: "PUT", body: input },
+    );
+  },
+
+  archiveTraderMemory(traderId: string, memoryId: string) {
+    return request<TraderMemory>(
+      `/traders/${encodeURIComponent(traderId)}/memories/${encodeURIComponent(memoryId)}`,
+      { method: "DELETE" },
+    );
+  },
+
+  searchTraderMemories(traderId: string, query: string) {
+    return request<TraderMemorySearchResponse>(
+      `/traders/${encodeURIComponent(traderId)}/memories/search`,
+      { method: "POST", body: { query } },
+    );
   },
 
   getMdProfile() {

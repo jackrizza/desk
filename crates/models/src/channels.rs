@@ -181,6 +181,55 @@ pub struct TraderPersona {
 }
 
 #[derive(Object, Serialize, Deserialize, Clone, Debug, Default)]
+pub struct TraderMemory {
+    pub id: String,
+    pub trader_id: String,
+    pub memory_type: String,
+    pub topic: String,
+    pub summary: String,
+    pub source_channel_id: Option<String>,
+    pub source_message_id: Option<String>,
+    pub confidence: Option<f64>,
+    pub importance: i64,
+    pub status: String,
+    pub last_used_at: Option<String>,
+    pub created_at: String,
+    pub updated_at: String,
+}
+
+#[derive(Object, Serialize, Deserialize, Clone, Debug, Default)]
+pub struct CreateTraderMemoryRequest {
+    pub memory_type: String,
+    pub topic: String,
+    pub summary: String,
+    pub source_channel_id: Option<String>,
+    pub source_message_id: Option<String>,
+    pub confidence: Option<f64>,
+    pub importance: Option<i64>,
+}
+
+#[derive(Object, Serialize, Deserialize, Clone, Debug, Default)]
+pub struct UpdateTraderMemoryRequest {
+    pub memory_type: Option<String>,
+    pub topic: Option<String>,
+    pub summary: Option<String>,
+    pub confidence: Option<f64>,
+    pub importance: Option<i64>,
+    pub status: Option<String>,
+}
+
+#[derive(Object, Serialize, Deserialize, Clone, Debug, Default)]
+pub struct TraderMemorySearchRequest {
+    pub query: String,
+    pub limit: Option<i64>,
+}
+
+#[derive(Object, Serialize, Deserialize, Clone, Debug, Default)]
+pub struct TraderMemorySearchResponse {
+    pub memories: Vec<TraderMemory>,
+}
+
+#[derive(Object, Serialize, Deserialize, Clone, Debug, Default)]
 pub struct EngineChannelContext {
     pub channels: Vec<Channel>,
     pub recent_messages: Vec<ChannelMessage>,
@@ -188,4 +237,5 @@ pub struct EngineChannelContext {
     pub md_openai_api_key: Option<String>,
     pub user_investor_profile: UserInvestorProfile,
     pub trader_personas: Vec<TraderPersona>,
+    pub trader_memories: Vec<TraderMemory>,
 }

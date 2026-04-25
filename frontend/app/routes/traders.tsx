@@ -19,6 +19,8 @@ import {
   type TraderTradeProposal,
   type PaperAccount,
   type DataSource,
+  type TraderMemory,
+  type CreateTraderMemoryRequest,
 } from "../lib/api";
 import { CHAT_COMMAND_EXECUTED_EVENT, useDeskChat } from "../lib/chat";
 import { CHAT_OPEN_STORAGE_KEY, usePersistentBoolean } from "../lib/ui-state";
@@ -53,6 +55,16 @@ type PersonaFormState = {
   communication_style: string;
 };
 
+type MemoryFormState = {
+  id: string;
+  memory_type: string;
+  topic: string;
+  summary: string;
+  importance: number;
+  confidence: string;
+  status: string;
+};
+
 const emptyForm: TraderFormState = {
   name: "",
   fundamental_perspective: "",
@@ -77,6 +89,16 @@ const emptyPersonaForm: PersonaFormState = {
   communication_style: "",
 };
 
+const emptyMemoryForm: MemoryFormState = {
+  id: "",
+  memory_type: "review",
+  topic: "",
+  summary: "",
+  importance: 3,
+  confidence: "",
+  status: "active",
+};
+
 export default function TradersRoute() {
   const params = useParams();
   const navigate = useNavigate();
@@ -89,6 +111,11 @@ export default function TradersRoute() {
   const [portfolioProposals, setPortfolioProposals] = useState<TraderPortfolioProposalDetail[]>([]);
   const [dataSources, setDataSources] = useState<DataSource[]>([]);
   const [assignedDataSourceIds, setAssignedDataSourceIds] = useState<string[]>([]);
+  const [memories, setMemories] = useState<TraderMemory[]>([]);
+  const [memoryFilters, setMemoryFilters] = useState({ status: "active", memory_type: "", topic: "" });
+  const [memoryForm, setMemoryForm] = useState<MemoryFormState>(emptyMemoryForm);
+  const [memoryModalOpen, setMemoryModalOpen] = useState(false);
+  const [memoryPending, setMemoryPending] = useState(false);
   const [form, setForm] = useState<TraderFormState>(emptyForm);
   const [editing, setEditing] = useState(false);
   const [apiKeySaved, setApiKeySaved] = useState(false);
@@ -136,17 +163,19 @@ export default function TradersRoute() {
     setDataSources(allSources);
     const id = nextTraderId ?? nextTraders[0]?.id;
     if (id) {
-      const [nextDetail, nextProposals, nextPortfolioProposals, assignedSources] = await Promise.all([
+      const [nextDetail, nextProposals, nextPortfolioProposals, assignedSources, nextMemories] = await Promise.all([
         deskApi.getTrader(id),
         deskApi.getTraderTradeProposals(id).catch(() => ({ proposals: [] })),
         deskApi.listTraderProposals(id).catch(() => ({ proposals: [] })),
         deskApi.getTraderDataSources(id).catch(() => ({ data_sources: [] })),
+        deskApi.listTraderMemories(id, memoryFilters).catch(() => []),
       ]);
       setDetail(nextDetail);
       setTraderSymbols(nextDetail.tracked_symbols ?? []);
       setProposals(nextProposals.proposals);
       setPortfolioProposals(nextPortfolioProposals.proposals);
       setAssignedDataSourceIds(assignedSources.data_sources.map((source) => source.id));
+      setMemories(nextMemories);
       if (!params.traderId) {
         navigate(`/traders/${encodeURIComponent(id)}`, { replace: true });
       }
@@ -155,6 +184,7 @@ export default function TradersRoute() {
       setProposals([]);
       setTraderSymbols([]);
       setPortfolioProposals([]);
+      setMemories([]);
     }
   }
 
@@ -179,7 +209,7 @@ export default function TradersRoute() {
       cancelled = true;
       window.clearInterval(intervalId);
     };
-  }, [params.traderId]);
+  }, [params.traderId, memoryFilters.status, memoryFilters.memory_type, memoryFilters.topic]);
 
   useEffect(() => {
     const handleCommand = () => {
@@ -305,6 +335,69 @@ export default function TradersRoute() {
       await refresh(selectedTrader.id);
     } catch (err) {
       setError(err instanceof Error ? err.message : "Failed to save persona.");
+    }
+  }
+
+  function openMemoryModal(memory?: TraderMemory) {
+    if (memory) {
+      setMemoryForm({
+        id: memory.id,
+        memory_type: memory.memory_type,
+        topic: memory.topic,
+        summary: memory.summary,
+        importance: memory.importance,
+        confidence: memory.confidence == null ? "" : String(memory.confidence),
+        status: memory.status,
+      });
+    } else {
+      setMemoryForm(emptyMemoryForm);
+    }
+    setMemoryModalOpen(true);
+  }
+
+  async function saveMemory(event: React.FormEvent<HTMLFormElement>) {
+    event.preventDefault();
+    if (!selectedTrader) return;
+    setError("");
+    setMemoryPending(true);
+    const payload: CreateTraderMemoryRequest = {
+      memory_type: memoryForm.memory_type,
+      topic: memoryForm.topic.trim(),
+      summary: memoryForm.summary.trim(),
+      importance: memoryForm.importance,
+      confidence: memoryForm.confidence ? Number(memoryForm.confidence) : null,
+    };
+    try {
+      if (memoryForm.id) {
+        await deskApi.updateTraderMemory(selectedTrader.id, memoryForm.id, {
+          ...payload,
+          status: memoryForm.status,
+        });
+      } else {
+        await deskApi.createTraderMemory(selectedTrader.id, payload);
+      }
+      setMemoryModalOpen(false);
+      setMemoryForm(emptyMemoryForm);
+      await refresh(selectedTrader.id);
+    } catch (err) {
+      setError(err instanceof Error ? err.message : "Failed to save memory.");
+    } finally {
+      setMemoryPending(false);
+    }
+  }
+
+  async function setMemoryStatus(memory: TraderMemory, status: "active" | "archived") {
+    if (!selectedTrader) return;
+    setError("");
+    try {
+      if (status === "archived") {
+        await deskApi.archiveTraderMemory(selectedTrader.id, memory.id);
+      } else {
+        await deskApi.updateTraderMemory(selectedTrader.id, memory.id, { status });
+      }
+      await refresh(selectedTrader.id);
+    } catch (err) {
+      setError(err instanceof Error ? err.message : "Failed to update memory.");
     }
   }
 
@@ -563,6 +656,19 @@ export default function TradersRoute() {
                   />
                 </Panel>
                 <div className="lg:col-span-2">
+                  <Panel title="Memories">
+                    <TraderMemoriesPanel
+                      memories={memories}
+                      filters={memoryFilters}
+                      setFilters={setMemoryFilters}
+                      onAdd={() => openMemoryModal()}
+                      onEdit={openMemoryModal}
+                      onArchive={(memory) => setMemoryStatus(memory, "archived")}
+                      onRestore={(memory) => setMemoryStatus(memory, "active")}
+                    />
+                  </Panel>
+                </div>
+                <div className="lg:col-span-2">
                   <Panel title="Tracked Symbols">
                     <TraderSymbolsPanel
                       symbols={traderSymbols}
@@ -598,6 +704,48 @@ export default function TradersRoute() {
         onSubmit={chat.sendMessage}
         onClear={chat.clearMessages}
       />
+      {memoryModalOpen ? (
+        <div className="app-modal-backdrop fixed inset-0 z-40 flex items-center justify-center p-4">
+          <form className="app-surface max-h-[90vh] w-full max-w-2xl overflow-auto rounded-lg p-5 shadow-lg" onSubmit={saveMemory}>
+            <div className="mb-4 flex items-center justify-between gap-3">
+              <h2 className="text-lg font-semibold">{memoryForm.id ? "Edit Memory" : "Add Memory"}</h2>
+              <button type="button" className="app-nav-link rounded px-2 py-1" onClick={() => setMemoryModalOpen(false)}>x</button>
+            </div>
+            <div className="grid gap-4">
+              <Field label="Topic">
+                <input className="app-input w-full rounded-lg px-3 py-2 text-sm" value={memoryForm.topic} onChange={(event) => setMemoryForm((current) => ({ ...current, topic: event.target.value }))} required />
+              </Field>
+              <Field label="Type">
+                <select className="app-input w-full rounded-lg px-3 py-2 text-sm" value={memoryForm.memory_type} onChange={(event) => setMemoryForm((current) => ({ ...current, memory_type: event.target.value }))}>
+                  {memoryTypes.map((type) => <option key={type} value={type}>{type}</option>)}
+                </select>
+              </Field>
+              <Field label="Summary">
+                <textarea className="app-input w-full rounded-lg px-3 py-2 text-sm" rows={5} maxLength={1000} value={memoryForm.summary} onChange={(event) => setMemoryForm((current) => ({ ...current, summary: event.target.value }))} required />
+              </Field>
+              <div className="grid gap-4 sm:grid-cols-3">
+                <Field label="Importance">
+                  <input type="number" min={1} max={5} className="app-input w-full rounded-lg px-3 py-2 text-sm" value={memoryForm.importance} onChange={(event) => setMemoryForm((current) => ({ ...current, importance: Number(event.target.value) }))} />
+                </Field>
+                <Field label="Confidence">
+                  <input type="number" min={0} max={1} step={0.01} className="app-input w-full rounded-lg px-3 py-2 text-sm" value={memoryForm.confidence} onChange={(event) => setMemoryForm((current) => ({ ...current, confidence: event.target.value }))} />
+                </Field>
+                <Field label="Status">
+                  <select className="app-input w-full rounded-lg px-3 py-2 text-sm" value={memoryForm.status} onChange={(event) => setMemoryForm((current) => ({ ...current, status: event.target.value }))}>
+                    <option value="active">active</option>
+                    <option value="archived">archived</option>
+                    <option value="superseded">superseded</option>
+                  </select>
+                </Field>
+              </div>
+            </div>
+            <div className="mt-5 flex justify-end gap-2">
+              <button type="button" className="app-button-secondary rounded-full px-4 py-2 text-sm" onClick={() => setMemoryModalOpen(false)}>Cancel</button>
+              <button className="app-button-primary rounded-full px-4 py-2 text-sm" disabled={memoryPending}>{memoryPending ? "Saving..." : "Save memory"}</button>
+            </div>
+          </form>
+        </div>
+      ) : null}
     </div>
   );
 }
@@ -951,6 +1099,93 @@ function TraderDataSourcesPanel({
         </label>
       ))}
       <button className="app-button-primary rounded-full px-4 py-2 text-sm" onClick={onSave}>Save data sources</button>
+    </div>
+  );
+}
+
+const memoryTypes = [
+  "answer",
+  "review",
+  "decision",
+  "user_preference",
+  "risk_note",
+  "data_note",
+  "proposal_note",
+  "channel_resolution",
+];
+
+function TraderMemoriesPanel({
+  memories,
+  filters,
+  setFilters,
+  onAdd,
+  onEdit,
+  onArchive,
+  onRestore,
+}: {
+  memories: TraderMemory[];
+  filters: { status: string; memory_type: string; topic: string };
+  setFilters: React.Dispatch<React.SetStateAction<{ status: string; memory_type: string; topic: string }>>;
+  onAdd: () => void;
+  onEdit: (memory: TraderMemory) => void;
+  onArchive: (memory: TraderMemory) => void;
+  onRestore: (memory: TraderMemory) => void;
+}) {
+  return (
+    <div className="space-y-4">
+      <div className="flex flex-wrap items-end justify-between gap-3">
+        <div className="grid flex-1 gap-3 md:grid-cols-3">
+          <FilterSelect label="Status" value={filters.status} onChange={(value) => setFilters((current) => ({ ...current, status: value }))} options={["active", "archived", "superseded"]} />
+          <FilterSelect label="Type" value={filters.memory_type} onChange={(value) => setFilters((current) => ({ ...current, memory_type: value }))} options={memoryTypes} />
+          <Field label="Search text">
+            <input className="app-input w-full rounded-lg px-3 py-2 text-sm" value={filters.topic} onChange={(event) => setFilters((current) => ({ ...current, topic: event.target.value }))} placeholder="risk, sector, data..." />
+          </Field>
+        </div>
+        <button type="button" className="app-button-primary rounded-full px-4 py-2 text-sm" onClick={onAdd}>Add Memory</button>
+      </div>
+      {memories.length === 0 ? (
+        <p className="app-text-muted text-sm">No memories match the current filters.</p>
+      ) : (
+        <div className="overflow-x-auto">
+          <table className="w-full min-w-[980px] text-left text-sm">
+            <thead className="app-text-muted border-b text-xs uppercase">
+              <tr>
+                <th className="py-2 pr-3">Topic</th>
+                <th className="py-2 pr-3">Type</th>
+                <th className="py-2 pr-3">Summary</th>
+                <th className="py-2 pr-3">Importance</th>
+                <th className="py-2 pr-3">Confidence</th>
+                <th className="py-2 pr-3">Last Used</th>
+                <th className="py-2 pr-3">Created</th>
+                <th className="py-2 pr-3">Status</th>
+                <th className="py-2 pr-3">Actions</th>
+              </tr>
+            </thead>
+            <tbody>
+              {memories.map((memory) => (
+                <tr key={memory.id} className="border-b align-top">
+                  <td className="py-3 pr-3 font-medium">{memory.topic}</td>
+                  <td className="py-3 pr-3">{memory.memory_type}</td>
+                  <td className="py-3 pr-3 app-text-muted">{memory.summary}</td>
+                  <td className="py-3 pr-3">{memory.importance}</td>
+                  <td className="py-3 pr-3">{formatConfidence(memory.confidence)}</td>
+                  <td className="py-3 pr-3 app-text-muted text-xs">{memory.last_used_at ?? "-"}</td>
+                  <td className="py-3 pr-3 app-text-muted text-xs">{memory.created_at}</td>
+                  <td className="py-3 pr-3">{memory.status}</td>
+                  <td className="space-y-2 py-3 pr-3">
+                    <button type="button" className="app-button-secondary rounded-full px-3 py-1 text-xs" onClick={() => onEdit(memory)}>Edit</button>
+                    {memory.status === "archived" ? (
+                      <button type="button" className="app-button-primary ml-2 rounded-full px-3 py-1 text-xs" onClick={() => onRestore(memory)}>Restore</button>
+                    ) : (
+                      <button type="button" className="app-button-secondary ml-2 rounded-full px-3 py-1 text-xs" onClick={() => onArchive(memory)}>Archive</button>
+                    )}
+                  </td>
+                </tr>
+              ))}
+            </tbody>
+          </table>
+        </div>
+      )}
     </div>
   );
 }

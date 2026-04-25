@@ -1,9 +1,10 @@
 use chrono::Utc;
 use models::{
     channels::{
-        Channel, ChannelMessage, CreateChannelMessageRequest, DataScientistProfile,
-        EngineChannelContext, MdProfile, TraderPersona, TraderPersonaUpdateRequest,
-        UpdateDataScientistProfileRequest, UpdateMdProfileRequest,
+        Channel, ChannelMessage, CreateChannelMessageRequest, CreateTraderMemoryRequest,
+        DataScientistProfile, EngineChannelContext, MdProfile, TraderMemory,
+        TraderMemorySearchResponse, TraderPersona, TraderPersonaUpdateRequest,
+        UpdateDataScientistProfileRequest, UpdateMdProfileRequest, UpdateTraderMemoryRequest,
         UpdateUserInvestorProfileRequest, UserInvestorProfile,
     },
     data_sources::{
@@ -778,6 +779,33 @@ impl Database {
             );
             "#,
             r#"
+            CREATE TABLE IF NOT EXISTS trader_memories (
+                id TEXT PRIMARY KEY,
+                trader_id TEXT NOT NULL,
+                memory_type TEXT NOT NULL CHECK (memory_type IN ('answer', 'review', 'decision', 'user_preference', 'risk_note', 'data_note', 'proposal_note', 'channel_resolution')),
+                topic TEXT NOT NULL,
+                summary TEXT NOT NULL,
+                source_channel_id TEXT NULL,
+                source_message_id TEXT NULL,
+                confidence DOUBLE PRECISION NULL,
+                importance BIGINT NOT NULL DEFAULT 3,
+                status TEXT NOT NULL DEFAULT 'active' CHECK (status IN ('active', 'archived', 'superseded')),
+                last_used_at TEXT NULL,
+                created_at TEXT NOT NULL,
+                updated_at TEXT NOT NULL
+            );
+            "#,
+            r#"
+            CREATE TABLE IF NOT EXISTS trader_memory_links (
+                id TEXT PRIMARY KEY,
+                trader_id TEXT NOT NULL,
+                memory_id TEXT NOT NULL,
+                channel_message_id TEXT NOT NULL,
+                link_type TEXT NOT NULL CHECK (link_type IN ('created_from', 'referenced_by', 'prevented_repeat')),
+                created_at TEXT NOT NULL
+            );
+            "#,
+            r#"
             CREATE TABLE IF NOT EXISTS trader_info_sources (
                 id UUID PRIMARY KEY,
                 trader_id UUID NOT NULL REFERENCES traders(id) ON DELETE CASCADE,
@@ -929,6 +957,14 @@ impl Database {
             "CREATE INDEX IF NOT EXISTS idx_channel_messages_channel_created ON channel_messages(channel_id, created_at);",
             "CREATE INDEX IF NOT EXISTS idx_channel_messages_author ON channel_messages(author_type, author_id);",
             "CREATE INDEX IF NOT EXISTS idx_channel_messages_role ON channel_messages(role);",
+            "CREATE INDEX IF NOT EXISTS idx_trader_memories_trader_id ON trader_memories(trader_id);",
+            "CREATE INDEX IF NOT EXISTS idx_trader_memories_topic ON trader_memories(topic);",
+            "CREATE INDEX IF NOT EXISTS idx_trader_memories_type ON trader_memories(memory_type);",
+            "CREATE INDEX IF NOT EXISTS idx_trader_memories_status ON trader_memories(status);",
+            "CREATE INDEX IF NOT EXISTS idx_trader_memories_last_used ON trader_memories(last_used_at);",
+            "CREATE UNIQUE INDEX IF NOT EXISTS idx_trader_memory_links_unique ON trader_memory_links(trader_id, channel_message_id, link_type);",
+            "CREATE INDEX IF NOT EXISTS idx_trader_memory_links_trader_id ON trader_memory_links(trader_id);",
+            "CREATE INDEX IF NOT EXISTS idx_trader_memory_links_memory_id ON trader_memory_links(memory_id);",
             "ALTER TABLE trader_portfolio_proposals ADD COLUMN IF NOT EXISTS plan_state TEXT NOT NULL DEFAULT 'draft';",
             "ALTER TABLE trader_portfolio_proposals ADD COLUMN IF NOT EXISTS accepted_at TIMESTAMPTZ NULL;",
             "ALTER TABLE trader_portfolio_proposals ADD COLUMN IF NOT EXISTS active_until TIMESTAMPTZ NULL;",
@@ -1285,6 +1321,24 @@ impl Database {
             content_markdown: row.get("content_markdown"),
             metadata_json: row.get("metadata_json"),
             created_at: row.get("created_at"),
+        }
+    }
+
+    fn row_to_trader_memory(row: sqlx::postgres::PgRow) -> TraderMemory {
+        TraderMemory {
+            id: row.get("id"),
+            trader_id: row.get("trader_id"),
+            memory_type: row.get("memory_type"),
+            topic: row.get("topic"),
+            summary: row.get("summary"),
+            source_channel_id: row.get("source_channel_id"),
+            source_message_id: row.get("source_message_id"),
+            confidence: row.get("confidence"),
+            importance: row.get("importance"),
+            status: row.get("status"),
+            last_used_at: row.get("last_used_at"),
+            created_at: row.get("created_at"),
+            updated_at: row.get("updated_at"),
         }
     }
 
@@ -4004,6 +4058,231 @@ impl Database {
         Ok(row.map(Self::row_to_channel_message))
     }
 
+    pub async fn list_trader_memories(
+        &self,
+        trader_id: &str,
+        status: Option<&str>,
+        memory_type: Option<&str>,
+        topic: Option<&str>,
+    ) -> Result<Vec<TraderMemory>, sqlx::Error> {
+        let rows = sqlx::query(
+            r#"
+            SELECT id, trader_id, memory_type, topic, summary, source_channel_id,
+                   source_message_id, confidence, importance, status, last_used_at,
+                   created_at, updated_at
+            FROM trader_memories
+            WHERE trader_id = $1
+              AND ($2::text IS NULL OR $2 = '__all__' OR status = $2)
+              AND ($3::text IS NULL OR memory_type = $3)
+              AND ($4::text IS NULL OR topic ILIKE '%' || $4 || '%')
+            ORDER BY importance DESC, created_at DESC
+            "#,
+        )
+        .bind(trader_id)
+        .bind(status.unwrap_or("active"))
+        .bind(memory_type)
+        .bind(topic)
+        .fetch_all(&self.pool)
+        .await?;
+        Ok(rows.into_iter().map(Self::row_to_trader_memory).collect())
+    }
+
+    pub async fn search_trader_memories(
+        &self,
+        trader_id: &str,
+        query: &str,
+        limit: Option<i64>,
+    ) -> Result<TraderMemorySearchResponse, sqlx::Error> {
+        let terms = query
+            .split_whitespace()
+            .take(8)
+            .map(|term| term.trim_matches(|ch: char| !ch.is_ascii_alphanumeric()))
+            .filter(|term| term.len() >= 3)
+            .collect::<Vec<_>>();
+        let search = if terms.is_empty() {
+            query.trim().to_string()
+        } else {
+            terms.join(" ")
+        };
+        let rows = sqlx::query(
+            r#"
+            SELECT id, trader_id, memory_type, topic, summary, source_channel_id,
+                   source_message_id, confidence, importance, status, last_used_at,
+                   created_at, updated_at
+            FROM trader_memories
+            WHERE trader_id = $1
+              AND status = 'active'
+              AND ($2::text = '' OR topic ILIKE '%' || $2 || '%' OR summary ILIKE '%' || $2 || '%')
+            ORDER BY importance DESC, COALESCE(last_used_at, created_at) DESC
+            LIMIT $3
+            "#,
+        )
+        .bind(trader_id)
+        .bind(search)
+        .bind(limit.unwrap_or(5).clamp(1, 25))
+        .fetch_all(&self.pool)
+        .await?;
+        Ok(TraderMemorySearchResponse {
+            memories: rows.into_iter().map(Self::row_to_trader_memory).collect(),
+        })
+    }
+
+    pub async fn create_trader_memory(
+        &self,
+        trader_id: &str,
+        request: &CreateTraderMemoryRequest,
+    ) -> Result<TraderMemory, sqlx::Error> {
+        let now = Self::now_string();
+        let row = sqlx::query(
+            r#"
+            INSERT INTO trader_memories (
+                id, trader_id, memory_type, topic, summary, source_channel_id,
+                source_message_id, confidence, importance, status, last_used_at,
+                created_at, updated_at
+            ) VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, 'active', NULL, $10, $10)
+            RETURNING id, trader_id, memory_type, topic, summary, source_channel_id,
+                      source_message_id, confidence, importance, status, last_used_at,
+                      created_at, updated_at
+            "#,
+        )
+        .bind(Self::new_id())
+        .bind(trader_id)
+        .bind(request.memory_type.trim())
+        .bind(request.topic.trim())
+        .bind(request.summary.trim())
+        .bind(request.source_channel_id.as_deref())
+        .bind(request.source_message_id.as_deref())
+        .bind(request.confidence)
+        .bind(request.importance.unwrap_or(3).clamp(1, 5))
+        .bind(now)
+        .fetch_one(&self.pool)
+        .await?;
+        Ok(Self::row_to_trader_memory(row))
+    }
+
+    pub async fn update_trader_memory(
+        &self,
+        trader_id: &str,
+        memory_id: &str,
+        request: &UpdateTraderMemoryRequest,
+    ) -> Result<Option<TraderMemory>, sqlx::Error> {
+        let row = sqlx::query(
+            r#"
+            UPDATE trader_memories
+            SET memory_type = COALESCE($3, memory_type),
+                topic = COALESCE($4, topic),
+                summary = COALESCE($5, summary),
+                confidence = COALESCE($6, confidence),
+                importance = COALESCE($7, importance),
+                status = COALESCE($8, status),
+                updated_at = $9
+            WHERE trader_id = $1 AND id = $2
+            RETURNING id, trader_id, memory_type, topic, summary, source_channel_id,
+                      source_message_id, confidence, importance, status, last_used_at,
+                      created_at, updated_at
+            "#,
+        )
+        .bind(trader_id)
+        .bind(memory_id)
+        .bind(request.memory_type.as_deref())
+        .bind(request.topic.as_deref())
+        .bind(request.summary.as_deref())
+        .bind(request.confidence)
+        .bind(request.importance)
+        .bind(request.status.as_deref())
+        .bind(Self::now_string())
+        .fetch_optional(&self.pool)
+        .await?;
+        Ok(row.map(Self::row_to_trader_memory))
+    }
+
+    pub async fn archive_trader_memory(
+        &self,
+        trader_id: &str,
+        memory_id: &str,
+    ) -> Result<Option<TraderMemory>, sqlx::Error> {
+        self.update_trader_memory(
+            trader_id,
+            memory_id,
+            &UpdateTraderMemoryRequest {
+                status: Some("archived".to_string()),
+                ..Default::default()
+            },
+        )
+        .await
+    }
+
+    pub async fn mark_trader_memory_used(
+        &self,
+        trader_id: &str,
+        memory_id: &str,
+    ) -> Result<Option<TraderMemory>, sqlx::Error> {
+        let now = Self::now_string();
+        let row = sqlx::query(
+            r#"
+            UPDATE trader_memories
+            SET last_used_at = $3, updated_at = $3
+            WHERE trader_id = $1 AND id = $2
+            RETURNING id, trader_id, memory_type, topic, summary, source_channel_id,
+                      source_message_id, confidence, importance, status, last_used_at,
+                      created_at, updated_at
+            "#,
+        )
+        .bind(trader_id)
+        .bind(memory_id)
+        .bind(now)
+        .fetch_optional(&self.pool)
+        .await?;
+        Ok(row.map(Self::row_to_trader_memory))
+    }
+
+    pub async fn create_trader_memory_link(
+        &self,
+        trader_id: &str,
+        memory_id: &str,
+        channel_message_id: &str,
+        link_type: &str,
+    ) -> Result<(), sqlx::Error> {
+        sqlx::query(
+            r#"
+            INSERT INTO trader_memory_links (id, trader_id, memory_id, channel_message_id, link_type, created_at)
+            VALUES ($1, $2, $3, $4, $5, $6)
+            ON CONFLICT (trader_id, channel_message_id, link_type) DO NOTHING
+            "#,
+        )
+        .bind(Self::new_id())
+        .bind(trader_id)
+        .bind(memory_id)
+        .bind(channel_message_id)
+        .bind(link_type)
+        .bind(Self::now_string())
+        .execute(&self.pool)
+        .await?;
+        Ok(())
+    }
+
+    pub async fn trader_memory_link_exists(
+        &self,
+        trader_id: &str,
+        channel_message_id: &str,
+        link_type: &str,
+    ) -> Result<bool, sqlx::Error> {
+        let row = sqlx::query(
+            r#"
+            SELECT 1
+            FROM trader_memory_links
+            WHERE trader_id = $1 AND channel_message_id = $2 AND link_type = $3
+            LIMIT 1
+            "#,
+        )
+        .bind(trader_id)
+        .bind(channel_message_id)
+        .bind(link_type)
+        .fetch_optional(&self.pool)
+        .await?;
+        Ok(row.is_some())
+    }
+
     pub async fn get_trader_persona(
         &self,
         trader_id: &str,
@@ -4282,6 +4561,19 @@ impl Database {
         )
         .fetch_all(&self.pool)
         .await?;
+        let memory_rows = sqlx::query(
+            r#"
+            SELECT id, trader_id, memory_type, topic, summary, source_channel_id,
+                   source_message_id, confidence, importance, status, last_used_at,
+                   created_at, updated_at
+            FROM trader_memories
+            WHERE status = 'active'
+            ORDER BY importance DESC, COALESCE(last_used_at, created_at) DESC
+            LIMIT 200
+            "#,
+        )
+        .fetch_all(&self.pool)
+        .await?;
         Ok(EngineChannelContext {
             channels,
             recent_messages,
@@ -4296,6 +4588,10 @@ impl Database {
                     tone: row.get("tone"),
                     communication_style: row.get("communication_style"),
                 })
+                .collect(),
+            trader_memories: memory_rows
+                .into_iter()
+                .map(Self::row_to_trader_memory)
                 .collect(),
         })
     }

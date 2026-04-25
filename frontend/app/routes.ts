@@ -5,7 +5,7 @@ export default [
   route("market", "routes/market-index.tsx"),
   route("market/:symbol", "routes/market-symbol.tsx"),
   route("data-sources", "routes/data-sources.tsx"),
-  route("channels", "routes/channels.tsx"),
+  route("channels/:channel?", "routes/channels.tsx"),
   route("strategies", "routes/projects-index.tsx"),
   route("strategies/:projectId", "routes/projects-detail.tsx"),
   route("strategies/:projectId/:tab", "routes/projects-stage.tsx"),

@@ -18,28 +18,28 @@ function formatTimestamp(value: string) {
 
 export function ChatPanel({
   open,
-  title,
-  messages,
-  pending,
-  suggestions,
+  title = "Desk assistant",
+  messages = [],
+  pending = false,
+  suggestions = [],
   chatTarget,
   chatTraders = [],
   onChatTargetChange,
   onClose,
-  onSubmit,
-  onClear,
+  onSubmit = () => undefined,
+  onClear = () => undefined,
 }: {
   open: boolean;
-  title: string;
-  messages: ChatMessage[];
-  pending: boolean;
-  suggestions: string[];
+  title?: string;
+  messages?: ChatMessage[];
+  pending?: boolean;
+  suggestions?: string[];
   chatTarget?: ChatTarget;
   chatTraders?: Trader[];
   onChatTargetChange?: (target: ChatTarget) => void;
   onClose: () => void;
-  onSubmit: (value: string) => Promise<void> | void;
-  onClear: () => void;
+  onSubmit?: (value: string) => Promise<void> | void;
+  onClear?: () => void;
 }) {
   const [draft, setDraft] = useState("");
   const scrollRef = useRef<HTMLDivElement | null>(null);

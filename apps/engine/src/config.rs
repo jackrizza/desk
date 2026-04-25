@@ -12,6 +12,8 @@ pub struct EngineConfig {
     pub channels_enabled: bool,
     pub md_enabled: bool,
     pub channel_check_interval_seconds: u64,
+    pub trader_memory_enabled: bool,
+    pub trader_memory_repeat_window_minutes: u64,
 }
 
 impl EngineConfig {
@@ -43,6 +45,14 @@ impl EngineConfig {
             .unwrap_or_else(|_| "60".to_string())
             .parse::<u64>()
             .context("ENGINE_CHANNEL_CHECK_INTERVAL_SECONDS must be a positive integer")?;
+        let trader_memory_enabled = env::var("ENGINE_TRADER_MEMORY_ENABLED")
+            .unwrap_or_else(|_| "true".to_string())
+            .parse::<bool>()
+            .context("ENGINE_TRADER_MEMORY_ENABLED must be true or false")?;
+        let trader_memory_repeat_window_minutes = env::var("TRADER_MEMORY_REPEAT_WINDOW_MINUTES")
+            .unwrap_or_else(|_| "60".to_string())
+            .parse::<u64>()
+            .context("TRADER_MEMORY_REPEAT_WINDOW_MINUTES must be a positive integer")?;
 
         Ok(Self {
             engine_name,
@@ -53,6 +63,8 @@ impl EngineConfig {
             channels_enabled,
             md_enabled,
             channel_check_interval_seconds,
+            trader_memory_enabled,
+            trader_memory_repeat_window_minutes,
         })
     }
 }
