@@ -159,11 +159,14 @@ fn parse_command(message: &str) -> Option<ChatCommandIntent> {
     if is_data_source_update(&lower) {
         return Some(parse_update_data_source(message));
     }
-    if is_data_source_create(&lower) {
-        return Some(parse_create_data_source(message));
-    }
     if lower.contains("assign ") && lower.contains(" to ") {
         return Some(parse_assignment(message));
+    }
+    if is_trader_create(&lower) {
+        return Some(parse_create_trader(message));
+    }
+    if is_data_source_create(&lower) {
+        return Some(parse_create_data_source(message));
     }
     if lower.starts_with("start ") {
         return Some(named_intent(
@@ -242,9 +245,6 @@ fn parse_command(message: &str) -> Option<ChatCommandIntent> {
             requires_confirmation: false,
         });
     }
-    if lower.contains("trader named ") || lower.contains("analyst trader named ") {
-        return Some(parse_create_trader(message));
-    }
     if lower.contains("recent items from ") {
         let name = message
             .split("from")
@@ -277,7 +277,7 @@ async fn parse_command_with_openai(message: &str) -> Option<ChatCommandIntent> {
 
 Parse only app-management requests for Traders, Data Sources, and Trader/Data Source assignments.
 Use trader freedom levels analyst, junior_trader, senior_trader.
-Use data source types rss, web_page, manual_note, placeholder_api.
+Use data source types rss, web_page, manual_note, placeholder_api, python_script.
 For ordinary explanatory chat, return action none and entity none.
 Do not include or request API keys. If the user asks to paste or replace an API key in chat, return action none."#;
     let body = json!({
@@ -337,7 +337,9 @@ fn apply_confirmation_rules(mut intent: ChatCommandIntent) -> ChatCommandIntent 
 
 fn parse_create_trader(message: &str) -> ChatCommandIntent {
     let lower = message.to_ascii_lowercase();
-    let name = extract_after_named(message).unwrap_or_else(|| "New Trader".to_string());
+    let name = extract_after_named(message)
+        .or_else(|| extract_called(message))
+        .unwrap_or_else(|| "New Trader".to_string());
     let freedom_level = if lower.contains("senior") {
         "senior_trader"
     } else if lower.contains("junior") {
@@ -345,6 +347,7 @@ fn parse_create_trader(message: &str) -> ChatCommandIntent {
     } else {
         "analyst"
     };
+    let data_source_names = extract_trader_source_names(message);
     ChatCommandIntent {
         action: "create".to_string(),
         entity: "trader".to_string(),
@@ -352,7 +355,8 @@ fn parse_create_trader(message: &str) -> ChatCommandIntent {
             "name": name,
             "fundamental_perspective": extract_perspective(message).unwrap_or_else(|| "Cautious fundamental perspective.".to_string()),
             "freedom_level": freedom_level,
-            "default_paper_account_id": null
+            "default_paper_account_id": null,
+            "data_source_names": data_source_names
         }),
         confidence: 0.84,
         requires_confirmation: freedom_level == "senior_trader",
@@ -361,7 +365,9 @@ fn parse_create_trader(message: &str) -> ChatCommandIntent {
 
 fn parse_create_data_source(message: &str) -> ChatCommandIntent {
     let lower = message.to_ascii_lowercase();
-    let source_type = if lower.contains("web page") || lower.contains("webpage") {
+    let source_type = if lower.contains("python") || lower.contains("script") {
+        "python_script"
+    } else if lower.contains("web page") || lower.contains("webpage") {
         "web_page"
     } else if lower.contains("manual") {
         "manual_note"
@@ -474,7 +480,9 @@ fn parse_update_data_source(message: &str) -> ChatCommandIntent {
         .unwrap_or("")
         .trim()
         .to_string();
-    let source_type = if lower.contains(" to rss") {
+    let source_type = if lower.contains(" to python") || lower.contains(" to script") {
+        Some("python_script")
+    } else if lower.contains(" to rss") {
         Some("rss")
     } else if lower.contains(" to web page") || lower.contains(" to webpage") {
         Some("web_page")
@@ -552,6 +560,37 @@ async fn create_trader(
         .get("freedom_level")
         .and_then(Value::as_str)
         .unwrap_or("analyst");
+    let existing = list_traders_by_name(database, &name).await?;
+    if existing.len() == 1 {
+        let trader = existing.into_iter().next().expect("one trader");
+        let assigned_count = assign_sources_from_parameters(database, &trader.id, p).await?;
+        let source_note = if assigned_count > 0 {
+            format!("\nAssigned {assigned_count} data source(s).")
+        } else {
+            String::new()
+        };
+        return Ok(response(
+            format!(
+                "Trader {} already exists, so I did not create another one.{}",
+                trader.name, source_note
+            ),
+            "trader_exists",
+            Some(trader.id),
+            intent,
+        ));
+    }
+    if existing.len() > 1 {
+        return Ok(response(
+            format!(
+                "I found {} traders named {} and did not create another duplicate. Please rename or delete duplicates before using chat creation for that name.",
+                existing.len(),
+                clean_entity_name(&name)
+            ),
+            "trader_duplicate_blocked",
+            None,
+            intent,
+        ));
+    }
     let key = env::var("CHAT_DEFAULT_OPENAI_API_KEY")
         .or_else(|_| env::var("OPENAI_API_KEY"))
         .unwrap_or_else(|_| "missing-key-add-in-trader-form".to_string());
@@ -572,16 +611,22 @@ async fn create_trader(
     )
     .await
     .map_err(|err| err.message)?;
+    let assigned_count = assign_sources_from_parameters(database, &trader.id, p).await?;
     let key_note =
         if env::var("CHAT_DEFAULT_OPENAI_API_KEY").is_ok() || env::var("OPENAI_API_KEY").is_ok() {
             ""
         } else {
             "\nAdd an OpenAI API key in the Trader form before starting engine-backed evaluations."
         };
+    let source_note = if assigned_count > 0 {
+        format!("\nAssigned {assigned_count} data source(s).")
+    } else {
+        String::new()
+    };
     Ok(response(
         format!(
-            "Created Trader\nName: {}\nFreedom Level: {}\nStatus: {}{}",
-            trader.name, trader.freedom_level, trader.status, key_note
+            "Created Trader\nName: {}\nFreedom Level: {}\nStatus: {}{}{}",
+            trader.name, trader.freedom_level, trader.status, source_note, key_note
         ),
         "trader_created",
         Some(trader.id),
@@ -619,6 +664,48 @@ async fn list_traders(
             .join("\n")
     };
     Ok(response(reply, "traders_listed", None, intent))
+}
+
+async fn assign_sources_from_parameters(
+    database: &Database,
+    trader_id: &str,
+    parameters: &Value,
+) -> Result<usize, String> {
+    let names = parameters
+        .get("data_source_names")
+        .and_then(Value::as_array)
+        .cloned()
+        .unwrap_or_default();
+    if names.is_empty() {
+        return Ok(0);
+    }
+
+    let mut source_ids = database
+        .list_trader_data_sources(trader_id)
+        .await
+        .map_err(|err| err.to_string())?
+        .into_iter()
+        .map(|source| source.id)
+        .collect::<Vec<_>>();
+    let mut assigned = 0;
+    for value in names {
+        let name = value.as_str().unwrap_or("");
+        let source = find_data_source_by_name(database, name).await?;
+        if !source_ids.contains(&source.id) {
+            source_ids.push(source.id);
+            assigned += 1;
+        }
+    }
+    data_sources::replace_trader_sources(
+        database,
+        trader_id,
+        UpdateTraderDataSourcesRequest {
+            data_source_ids: source_ids,
+        },
+    )
+    .await
+    .map_err(|err| err.message)?;
+    Ok(assigned)
 }
 
 async fn set_trader_status(
@@ -1064,36 +1151,49 @@ async fn find_trader_by_name(
     database: &Database,
     name: &str,
 ) -> Result<models::trader::Trader, String> {
-    let matches = traders::list_traders(database)
-        .await
-        .map_err(|err| err.message)?
-        .into_iter()
-        .filter(|trader| trader.name.eq_ignore_ascii_case(name.trim()))
-        .collect::<Vec<_>>();
+    let normalized_name = clean_entity_name(name);
+    let matches = list_traders_by_name(database, &normalized_name).await?;
     match matches.len() {
-        0 => Err(format!("No trader named {name} was found.")),
+        0 => Err(format!("No trader named {normalized_name} was found.")),
         1 => Ok(matches.into_iter().next().expect("one match")),
         _ => Err(format!(
-            "Multiple traders named {name} were found. Please clarify."
+            "Multiple traders named {normalized_name} were found. Please clarify."
         )),
     }
+}
+
+async fn list_traders_by_name(
+    database: &Database,
+    name: &str,
+) -> Result<Vec<models::trader::Trader>, String> {
+    let normalized_name = clean_entity_name(name);
+    traders::list_traders(database)
+        .await
+        .map_err(|err| err.message)
+        .map(|traders| {
+            traders
+                .into_iter()
+                .filter(|trader| trader.name.eq_ignore_ascii_case(normalized_name.trim()))
+                .collect::<Vec<_>>()
+        })
 }
 
 async fn find_data_source_by_name(
     database: &Database,
     name: &str,
 ) -> Result<models::data_sources::DataSource, String> {
+    let normalized_name = clean_entity_name(name);
     let matches = data_sources::list(database)
         .await
         .map_err(|err| err.message)?
         .into_iter()
-        .filter(|source| source.name.eq_ignore_ascii_case(name.trim()))
+        .filter(|source| source.name.eq_ignore_ascii_case(normalized_name.trim()))
         .collect::<Vec<_>>();
     match matches.len() {
-        0 => Err(format!("No data source named {name} was found.")),
+        0 => Err(format!("No data source named {normalized_name} was found.")),
         1 => Ok(matches.into_iter().next().expect("one match")),
         _ => Err(format!(
-            "Multiple data sources named {name} were found. Please clarify."
+            "Multiple data sources named {normalized_name} were found. Please clarify."
         )),
     }
 }
@@ -1126,6 +1226,15 @@ fn required_string(parameters: &Value, key: &str) -> Result<String, String> {
         .filter(|value| !value.is_empty())
         .map(str::to_string)
         .ok_or_else(|| format!("{key} is required"))
+}
+
+fn is_trader_create(lower: &str) -> bool {
+    (lower.contains("trader named ")
+        || lower.contains("trader called ")
+        || lower.contains("analyst trader")
+        || lower.contains("junior trader")
+        || lower.contains("senior trader"))
+        && (lower.contains("create") || lower.contains("add") || lower.contains("make"))
 }
 
 fn is_trader_update(lower: &str) -> bool {
@@ -1171,6 +1280,9 @@ fn extract_called(message: &str) -> Option<String> {
         .split(" called ")
         .nth(1)
         .map(|value| value.split(" using ").next().unwrap_or(value))
+        .map(|value| value.split(" that ").next().unwrap_or(value))
+        .map(|value| value.split(" with ").next().unwrap_or(value))
+        .map(|value| value.split(" is ").next().unwrap_or(value))
         .map(|value| value.trim().trim_end_matches('.').to_string())
         .filter(|value| !value.is_empty())
 }
@@ -1202,6 +1314,23 @@ fn extract_after_for(message: &str) -> Option<String> {
 
 fn extract_perspective(message: &str) -> Option<String> {
     let lower = message.to_ascii_lowercase();
+    if lower.contains("goal is") || lower.contains("goal ") {
+        return message
+            .split("goal is")
+            .nth(1)
+            .or_else(|| message.split("goal").nth(1))
+            .map(|value| value.trim().trim_start_matches("is").trim())
+            .map(|value| value.trim().trim_end_matches('.').to_string())
+            .filter(|value| !value.is_empty());
+    }
+    if lower.contains("its goal is") {
+        return message
+            .split("Its goal is")
+            .nth(1)
+            .or_else(|| message.split("its goal is").nth(1))
+            .map(|value| value.trim().trim_end_matches('.').to_string())
+            .filter(|value| !value.is_empty());
+    }
     if lower.contains("cautious") && lower.contains("macro") {
         return Some("Cautious macro-focused fundamental perspective.".to_string());
     }
@@ -1209,6 +1338,38 @@ fn extract_perspective(message: &str) -> Option<String> {
         .split("focused on")
         .nth(1)
         .map(|value| value.trim().trim_end_matches('.').to_string())
+}
+
+fn extract_trader_source_names(message: &str) -> Vec<String> {
+    let Some(after_using) = message.split(" using ").nth(1) else {
+        return vec![];
+    };
+    let source_text = after_using
+        .split(".")
+        .next()
+        .unwrap_or(after_using)
+        .trim()
+        .trim_end_matches(" data sources")
+        .trim_end_matches(" data source")
+        .trim_end_matches(" sources")
+        .trim_end_matches(" source")
+        .trim();
+    source_text
+        .split(" and ")
+        .flat_map(|part| part.split(','))
+        .map(clean_entity_name)
+        .filter(|value| !value.is_empty())
+        .collect()
+}
+
+fn clean_entity_name(value: &str) -> String {
+    clean_name(value)
+        .trim_start_matches("the ")
+        .trim_start_matches("The ")
+        .trim_start_matches("a ")
+        .trim_start_matches("A ")
+        .trim()
+        .to_string()
 }
 
 fn confirmation_message(intent: &ChatCommandIntent) -> String {

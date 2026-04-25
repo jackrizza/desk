@@ -1,7 +1,13 @@
 use chrono::Utc;
 use models::{
+    channels::{
+        Channel, ChannelMessage, CreateChannelMessageRequest, DataScientistProfile,
+        EngineChannelContext, MdProfile, TraderPersona, TraderPersonaUpdateRequest,
+        UpdateDataScientistProfileRequest, UpdateMdProfileRequest,
+        UpdateUserInvestorProfileRequest, UserInvestorProfile,
+    },
     data_sources::{
-        CreateDataSourceRequest, DataSource, DataSourceEvent, DataSourceItem,
+        CreateDataSourceRequest, DataSource, DataSourceEvent, DataSourceItem, DataSourceScript,
         EngineTraderDataSource, TraderDataSourceAssignment, UpdateDataSourceRequest,
     },
     engine::{
@@ -11,9 +17,12 @@ use models::{
     portfolio::{Portfolio, Position},
     projects::Project,
     trader::{
-        CreateTraderEventRequest, CreateTraderInfoSourceRequest, CreateTraderTradeProposalRequest,
-        EngineRunnableTrader, Trader, TraderEvent, TraderInfoSource, TraderRuntimeState,
-        TraderTradeProposal, UpsertTraderRuntimeStateRequest,
+        CreateTraderEventRequest, CreateTraderInfoSourceRequest,
+        CreateTraderPortfolioProposalActionRequest, CreateTraderPortfolioProposalRequest,
+        CreateTraderSymbolRequest, CreateTraderTradeProposalRequest, EngineRunnableTrader, Trader,
+        TraderEvent, TraderInfoSource, TraderPortfolioProposal, TraderPortfolioProposalAction,
+        TraderPortfolioProposalDetail, TraderRuntimeState, TraderSymbol, TraderTradeProposal,
+        UpdateTraderSymbolRequest, UpsertTraderRuntimeStateRequest,
     },
     trading::{
         CreateStrategySignalRequest, EngineRunnableStrategy, StrategyDefinition,
@@ -22,7 +31,7 @@ use models::{
     },
 };
 use serde_json::Value;
-use sqlx::{PgPool, Postgres, Row, Transaction, postgres::PgPoolOptions};
+use sqlx::{PgPool, Postgres, QueryBuilder, Row, Transaction, postgres::PgPoolOptions};
 use uuid::Uuid;
 
 pub struct Database {
@@ -589,7 +598,7 @@ impl Database {
             CREATE TABLE IF NOT EXISTS scrapper.data_sources (
                 id UUID PRIMARY KEY,
                 name TEXT NOT NULL,
-                source_type TEXT NOT NULL CHECK (source_type IN ('rss', 'web_page', 'manual_note', 'placeholder_api')),
+                source_type TEXT NOT NULL CHECK (source_type IN ('rss', 'web_page', 'manual_note', 'placeholder_api', 'python_script')),
                 url TEXT NULL,
                 config_json JSONB NULL,
                 enabled BOOLEAN NOT NULL DEFAULT TRUE,
@@ -597,6 +606,25 @@ impl Database {
                 last_checked_at TIMESTAMPTZ NULL,
                 last_success_at TIMESTAMPTZ NULL,
                 last_error TEXT NULL,
+                created_at TIMESTAMPTZ NOT NULL,
+                updated_at TIMESTAMPTZ NOT NULL
+            );
+            "#,
+            "ALTER TABLE scrapper.data_sources DROP CONSTRAINT IF EXISTS data_sources_source_type_check;",
+            r#"
+            ALTER TABLE scrapper.data_sources
+            ADD CONSTRAINT data_sources_source_type_check
+            CHECK (source_type IN ('rss', 'web_page', 'manual_note', 'placeholder_api', 'python_script'));
+            "#,
+            r#"
+            CREATE TABLE IF NOT EXISTS scrapper.data_source_scripts (
+                data_source_id UUID PRIMARY KEY REFERENCES scrapper.data_sources(id) ON DELETE CASCADE,
+                language TEXT NOT NULL DEFAULT 'python',
+                script_text TEXT NOT NULL,
+                script_hash TEXT NULL,
+                last_build_status TEXT NULL CHECK (last_build_status IS NULL OR last_build_status IN ('not_built', 'success', 'failed')),
+                last_build_output TEXT NULL,
+                last_built_at TIMESTAMPTZ NULL,
                 created_at TIMESTAMPTZ NOT NULL,
                 updated_at TIMESTAMPTZ NOT NULL
             );
@@ -667,6 +695,89 @@ impl Database {
             );
             "#,
             r#"
+            ALTER TABLE traders ADD COLUMN IF NOT EXISTS persona TEXT NULL;
+            "#,
+            r#"
+            ALTER TABLE traders ADD COLUMN IF NOT EXISTS tone TEXT NULL;
+            "#,
+            r#"
+            ALTER TABLE traders ADD COLUMN IF NOT EXISTS communication_style TEXT NULL;
+            "#,
+            r#"
+            CREATE TABLE IF NOT EXISTS channels (
+                id TEXT PRIMARY KEY,
+                name TEXT NOT NULL UNIQUE,
+                display_name TEXT NOT NULL,
+                description TEXT NULL,
+                is_system BOOLEAN NOT NULL DEFAULT FALSE,
+                created_at TEXT NOT NULL,
+                updated_at TEXT NOT NULL
+            );
+            "#,
+            r#"
+            CREATE TABLE IF NOT EXISTS channel_messages (
+                id TEXT PRIMARY KEY,
+                channel_id TEXT NOT NULL,
+                author_type TEXT NOT NULL CHECK (author_type IN ('user', 'trader', 'md', 'system')),
+                author_id TEXT NULL,
+                author_name TEXT NOT NULL,
+                role TEXT NOT NULL DEFAULT 'message' CHECK (role IN ('message', 'question', 'answer', 'alert', 'proposal', 'review', 'system')),
+                content_markdown TEXT NOT NULL,
+                metadata_json TEXT NULL,
+                created_at TEXT NOT NULL
+            );
+            "#,
+            r#"
+            CREATE TABLE IF NOT EXISTS md_profile (
+                id TEXT PRIMARY KEY,
+                name TEXT NOT NULL DEFAULT 'MD',
+                persona TEXT NOT NULL,
+                tone TEXT NOT NULL,
+                communication_style TEXT NOT NULL,
+                openai_api_key_secret TEXT NULL,
+                created_at TEXT NOT NULL,
+                updated_at TEXT NOT NULL
+            );
+            "#,
+            r#"
+            ALTER TABLE md_profile ADD COLUMN IF NOT EXISTS openai_api_key_secret TEXT NULL;
+            "#,
+            r#"
+            CREATE TABLE IF NOT EXISTS data_scientist_profile (
+                id TEXT PRIMARY KEY,
+                name TEXT NOT NULL DEFAULT 'Data Scientist',
+                persona TEXT NOT NULL,
+                tone TEXT NOT NULL,
+                communication_style TEXT NOT NULL,
+                openai_api_key_secret TEXT NULL,
+                created_at TEXT NOT NULL,
+                updated_at TEXT NOT NULL
+            );
+            "#,
+            r#"
+            ALTER TABLE data_scientist_profile ADD COLUMN IF NOT EXISTS openai_api_key_secret TEXT NULL;
+            "#,
+            r#"
+            CREATE TABLE IF NOT EXISTS user_investor_profile (
+                id TEXT PRIMARY KEY,
+                name TEXT NULL,
+                age INTEGER NULL,
+                about TEXT NULL,
+                investment_goals TEXT NULL,
+                risk_tolerance TEXT NULL,
+                time_horizon TEXT NULL,
+                liquidity_needs TEXT NULL,
+                income_needs TEXT NULL,
+                investment_experience TEXT NULL,
+                restrictions TEXT NULL,
+                preferred_sectors TEXT NULL,
+                avoided_sectors TEXT NULL,
+                notes TEXT NULL,
+                created_at TEXT NOT NULL,
+                updated_at TEXT NOT NULL
+            );
+            "#,
+            r#"
             CREATE TABLE IF NOT EXISTS trader_info_sources (
                 id UUID PRIMARY KEY,
                 trader_id UUID NOT NULL REFERENCES traders(id) ON DELETE CASCADE,
@@ -726,15 +837,217 @@ impl Database {
                 updated_at TIMESTAMPTZ NOT NULL
             );
             "#,
+            r#"
+            CREATE TABLE IF NOT EXISTS trader_symbols (
+                id UUID PRIMARY KEY,
+                trader_id UUID NOT NULL REFERENCES traders(id) ON DELETE CASCADE,
+                symbol TEXT NOT NULL,
+                asset_type TEXT NOT NULL DEFAULT 'stock' CHECK (asset_type IN ('stock', 'etf', 'index', 'crypto', 'other')),
+                name TEXT NULL,
+                exchange TEXT NULL,
+                sector TEXT NULL,
+                industry TEXT NULL,
+                notes TEXT NULL,
+                thesis TEXT NULL,
+                fit_score DOUBLE PRECISION NULL,
+                status TEXT NOT NULL DEFAULT 'watching' CHECK (status IN ('watching', 'candidate', 'active', 'rejected', 'archived')),
+                source TEXT NOT NULL DEFAULT 'manual' CHECK (source IN ('manual', 'ai', 'import', 'engine')),
+                created_at TIMESTAMPTZ NOT NULL,
+                updated_at TIMESTAMPTZ NOT NULL,
+                UNIQUE(trader_id, symbol)
+            );
+            "#,
+            r#"
+            CREATE TABLE IF NOT EXISTS trader_portfolio_proposals (
+                id UUID PRIMARY KEY,
+                trader_id UUID NOT NULL REFERENCES traders(id) ON DELETE CASCADE,
+                paper_account_id UUID NULL REFERENCES paper_accounts(id) ON DELETE SET NULL,
+                title TEXT NOT NULL,
+                summary TEXT NOT NULL,
+                thesis TEXT NOT NULL,
+                status TEXT NOT NULL DEFAULT 'proposed' CHECK (status IN ('proposed', 'accepted', 'rejected', 'superseded', 'executed', 'expired')),
+                plan_state TEXT NOT NULL DEFAULT 'draft' CHECK (plan_state IN ('draft', 'active', 'superseded', 'completed', 'invalidated', 'rejected')),
+                confidence DOUBLE PRECISION NULL,
+                proposed_actions_json JSONB NOT NULL,
+                source_snapshot_json JSONB NULL,
+                risk_snapshot_json JSONB NULL,
+                market_snapshot_json JSONB NULL,
+                market_basis_json JSONB NULL,
+                invalidation_conditions_json JSONB NULL,
+                change_thresholds_json JSONB NULL,
+                replacement_reason TEXT NULL,
+                created_at TIMESTAMPTZ NOT NULL,
+                updated_at TIMESTAMPTZ NOT NULL,
+                reviewed_at TIMESTAMPTZ NULL,
+                review_note TEXT NULL,
+                accepted_at TIMESTAMPTZ NULL,
+                active_until TIMESTAMPTZ NULL,
+                expected_duration_seconds BIGINT NULL
+            );
+            "#,
+            r#"
+            CREATE TABLE IF NOT EXISTS trader_portfolio_proposal_actions (
+                id UUID PRIMARY KEY,
+                proposal_id UUID NOT NULL REFERENCES trader_portfolio_proposals(id) ON DELETE CASCADE,
+                trader_id UUID NOT NULL REFERENCES traders(id) ON DELETE CASCADE,
+                symbol TEXT NULL,
+                action_type TEXT NOT NULL CHECK (action_type IN ('buy', 'sell', 'hold', 'watch', 'activate_symbol', 'reject_symbol', 'reduce', 'increase', 'no_action')),
+                side TEXT NULL,
+                quantity DOUBLE PRECISION NULL,
+                order_type TEXT NULL,
+                entry_price DOUBLE PRECISION NULL,
+                exit_price DOUBLE PRECISION NULL,
+                limit_price DOUBLE PRECISION NULL,
+                stop_price DOUBLE PRECISION NULL,
+                expected_duration_seconds BIGINT NULL,
+                enact_by TIMESTAMPTZ NULL,
+                market_price_at_creation DOUBLE PRECISION NULL,
+                rationale TEXT NOT NULL,
+                confidence DOUBLE PRECISION NULL,
+                risk_decision TEXT NULL,
+                status TEXT NOT NULL DEFAULT 'proposed',
+                created_at TIMESTAMPTZ NOT NULL,
+                updated_at TIMESTAMPTZ NOT NULL
+            );
+            "#,
             "CREATE INDEX IF NOT EXISTS idx_traders_status ON traders(status);",
             "CREATE INDEX IF NOT EXISTS idx_traders_freedom_level ON traders(freedom_level);",
             "CREATE INDEX IF NOT EXISTS idx_trader_events_trader_id_created_at ON trader_events(trader_id, created_at DESC);",
             "CREATE INDEX IF NOT EXISTS idx_trader_trade_proposals_trader_id_status ON trader_trade_proposals(trader_id, status);",
             "CREATE INDEX IF NOT EXISTS idx_trader_runtime_state_last_heartbeat_at ON trader_runtime_state(last_heartbeat_at DESC);",
+            "CREATE INDEX IF NOT EXISTS idx_trader_symbols_trader_id ON trader_symbols(trader_id);",
+            "CREATE INDEX IF NOT EXISTS idx_trader_symbols_symbol ON trader_symbols(symbol);",
+            "CREATE INDEX IF NOT EXISTS idx_trader_symbols_status ON trader_symbols(status);",
+            "CREATE INDEX IF NOT EXISTS idx_trader_symbols_asset_type ON trader_symbols(asset_type);",
+            "CREATE INDEX IF NOT EXISTS idx_trader_symbols_fit_score ON trader_symbols(fit_score DESC);",
+            "CREATE INDEX IF NOT EXISTS idx_trader_portfolio_proposals_trader_created ON trader_portfolio_proposals(trader_id, created_at DESC);",
+            "CREATE INDEX IF NOT EXISTS idx_trader_portfolio_proposals_trader_status ON trader_portfolio_proposals(trader_id, status);",
+            "CREATE INDEX IF NOT EXISTS idx_trader_portfolio_proposal_actions_proposal ON trader_portfolio_proposal_actions(proposal_id);",
+            "CREATE INDEX IF NOT EXISTS idx_trader_portfolio_proposal_actions_trader_symbol ON trader_portfolio_proposal_actions(trader_id, symbol);",
+            "CREATE INDEX IF NOT EXISTS idx_trader_portfolio_proposal_actions_status ON trader_portfolio_proposal_actions(status);",
+            "CREATE INDEX IF NOT EXISTS idx_channels_name ON channels(name);",
+            "CREATE INDEX IF NOT EXISTS idx_channel_messages_channel_created ON channel_messages(channel_id, created_at);",
+            "CREATE INDEX IF NOT EXISTS idx_channel_messages_author ON channel_messages(author_type, author_id);",
+            "CREATE INDEX IF NOT EXISTS idx_channel_messages_role ON channel_messages(role);",
+            "ALTER TABLE trader_portfolio_proposals ADD COLUMN IF NOT EXISTS plan_state TEXT NOT NULL DEFAULT 'draft';",
+            "ALTER TABLE trader_portfolio_proposals ADD COLUMN IF NOT EXISTS accepted_at TIMESTAMPTZ NULL;",
+            "ALTER TABLE trader_portfolio_proposals ADD COLUMN IF NOT EXISTS active_until TIMESTAMPTZ NULL;",
+            "ALTER TABLE trader_portfolio_proposals ADD COLUMN IF NOT EXISTS expected_duration_seconds BIGINT NULL;",
+            "ALTER TABLE trader_portfolio_proposals ADD COLUMN IF NOT EXISTS market_basis_json JSONB NULL;",
+            "ALTER TABLE trader_portfolio_proposals ADD COLUMN IF NOT EXISTS invalidation_conditions_json JSONB NULL;",
+            "ALTER TABLE trader_portfolio_proposals ADD COLUMN IF NOT EXISTS change_thresholds_json JSONB NULL;",
+            "ALTER TABLE trader_portfolio_proposals ADD COLUMN IF NOT EXISTS replacement_reason TEXT NULL;",
+            "ALTER TABLE trader_portfolio_proposal_actions ADD COLUMN IF NOT EXISTS entry_price DOUBLE PRECISION NULL;",
+            "ALTER TABLE trader_portfolio_proposal_actions ADD COLUMN IF NOT EXISTS exit_price DOUBLE PRECISION NULL;",
+            "ALTER TABLE trader_portfolio_proposal_actions ADD COLUMN IF NOT EXISTS limit_price DOUBLE PRECISION NULL;",
+            "ALTER TABLE trader_portfolio_proposal_actions ADD COLUMN IF NOT EXISTS stop_price DOUBLE PRECISION NULL;",
+            "ALTER TABLE trader_portfolio_proposal_actions ADD COLUMN IF NOT EXISTS expected_duration_seconds BIGINT NULL;",
+            "ALTER TABLE trader_portfolio_proposal_actions ADD COLUMN IF NOT EXISTS enact_by TIMESTAMPTZ NULL;",
+            "ALTER TABLE trader_portfolio_proposal_actions ADD COLUMN IF NOT EXISTS market_price_at_creation DOUBLE PRECISION NULL;",
         ] {
             sqlx::query(statement).execute(&self.pool).await?;
         }
 
+        self.seed_channels().await?;
+        self.seed_md_profile().await?;
+        self.seed_data_scientist_profile().await?;
+        self.seed_user_investor_profile().await?;
+
+        Ok(())
+    }
+
+    async fn seed_channels(&self) -> Result<(), sqlx::Error> {
+        let now = Self::now_string();
+        for (name, display_name, description) in [
+            ("general", "#general", "Broad coordination and discussion."),
+            (
+                "data_analysis",
+                "#data_analysis",
+                "Data quality, source gaps, and analysis questions.",
+            ),
+            (
+                "trading",
+                "#trading",
+                "Trade proposals, portfolio plans, and risk coordination.",
+            ),
+        ] {
+            sqlx::query(
+                r#"
+                INSERT INTO channels (id, name, display_name, description, is_system, created_at, updated_at)
+                VALUES ($1, $2, $3, $4, TRUE, $5, $6)
+                ON CONFLICT (name) DO UPDATE
+                SET display_name = EXCLUDED.display_name,
+                    description = EXCLUDED.description,
+                    is_system = TRUE,
+                    updated_at = EXCLUDED.updated_at
+                "#,
+            )
+            .bind(name)
+            .bind(name)
+            .bind(display_name)
+            .bind(description)
+            .bind(&now)
+            .bind(&now)
+            .execute(&self.pool)
+            .await?;
+        }
+        Ok(())
+    }
+
+    async fn seed_md_profile(&self) -> Result<(), sqlx::Error> {
+        let now = Self::now_string();
+        sqlx::query(
+            r#"
+            INSERT INTO md_profile (id, name, persona, tone, communication_style, created_at, updated_at)
+            VALUES ($1, 'MD', $2, $3, $4, $5, $6)
+            ON CONFLICT (id) DO NOTHING
+            "#,
+        )
+        .bind("default")
+        .bind("The MD is a managing director responsible for monitoring trader reasoning, reducing drift, asking clarifying questions, identifying weak assumptions, and encouraging collaboration. The MD does not place trades.")
+        .bind("Direct, calm, skeptical, risk-aware, and constructive.")
+        .bind("Monitors channel discussion, asks clarifying questions, summarizes disagreements, and reminds traders of risk and user context without executing trades.")
+        .bind(&now)
+        .bind(&now)
+        .execute(&self.pool)
+        .await?;
+        Ok(())
+    }
+
+    async fn seed_data_scientist_profile(&self) -> Result<(), sqlx::Error> {
+        let now = Self::now_string();
+        sqlx::query(
+            r#"
+            INSERT INTO data_scientist_profile (id, name, persona, tone, communication_style, created_at, updated_at)
+            VALUES ($1, 'Data Scientist', $2, $3, $4, $5, $6)
+            ON CONFLICT (id) DO NOTHING
+            "#,
+        )
+        .bind("default")
+        .bind("The Data Scientist designs, debugs, and improves data sources for the trading application. It can inspect user-provided URLs, reason about extraction strategies, and create Python Script data sources. It does not trade.")
+        .bind("Technical, precise, practical, and concise.")
+        .bind("Explains extraction assumptions, script limitations, build results, and next steps without placing trades or requesting secrets.")
+        .bind(&now)
+        .bind(&now)
+        .execute(&self.pool)
+        .await?;
+        Ok(())
+    }
+
+    async fn seed_user_investor_profile(&self) -> Result<(), sqlx::Error> {
+        let now = Self::now_string();
+        sqlx::query(
+            r#"
+            INSERT INTO user_investor_profile (id, created_at, updated_at)
+            VALUES ($1, $2, $3)
+            ON CONFLICT (id) DO NOTHING
+            "#,
+        )
+        .bind("default")
+        .bind(&now)
+        .bind(&now)
+        .execute(&self.pool)
+        .await?;
         Ok(())
     }
 
@@ -938,11 +1251,85 @@ impl Database {
             freedom_level: row.get("freedom_level"),
             status: row.get("status"),
             default_paper_account_id: row.get("default_paper_account_id"),
+            persona: row.try_get("persona").ok(),
+            tone: row.try_get("tone").ok(),
+            communication_style: row.try_get("communication_style").ok(),
             is_active: row.get("is_active"),
             created_at: row.get("created_at"),
             updated_at: row.get("updated_at"),
             started_at: row.get("started_at"),
             stopped_at: row.get("stopped_at"),
+        }
+    }
+
+    fn row_to_channel(row: sqlx::postgres::PgRow) -> Channel {
+        Channel {
+            id: row.get("id"),
+            name: row.get("name"),
+            display_name: row.get("display_name"),
+            description: row.get("description"),
+            is_system: row.get("is_system"),
+            created_at: row.get("created_at"),
+            updated_at: row.get("updated_at"),
+        }
+    }
+
+    fn row_to_channel_message(row: sqlx::postgres::PgRow) -> ChannelMessage {
+        ChannelMessage {
+            id: row.get("id"),
+            channel_id: row.get("channel_id"),
+            author_type: row.get("author_type"),
+            author_id: row.get("author_id"),
+            author_name: row.get("author_name"),
+            role: row.get("role"),
+            content_markdown: row.get("content_markdown"),
+            metadata_json: row.get("metadata_json"),
+            created_at: row.get("created_at"),
+        }
+    }
+
+    fn row_to_md_profile(row: sqlx::postgres::PgRow) -> MdProfile {
+        MdProfile {
+            id: row.get("id"),
+            name: row.get("name"),
+            persona: row.get("persona"),
+            tone: row.get("tone"),
+            communication_style: row.get("communication_style"),
+            created_at: row.get("created_at"),
+            updated_at: row.get("updated_at"),
+        }
+    }
+
+    fn row_to_data_scientist_profile(row: sqlx::postgres::PgRow) -> DataScientistProfile {
+        DataScientistProfile {
+            id: row.get("id"),
+            name: row.get("name"),
+            persona: row.get("persona"),
+            tone: row.get("tone"),
+            communication_style: row.get("communication_style"),
+            created_at: row.get("created_at"),
+            updated_at: row.get("updated_at"),
+        }
+    }
+
+    fn row_to_user_investor_profile(row: sqlx::postgres::PgRow) -> UserInvestorProfile {
+        UserInvestorProfile {
+            id: row.get("id"),
+            name: row.get("name"),
+            age: row.get::<Option<i32>, _>("age").map(i64::from),
+            about: row.get("about"),
+            investment_goals: row.get("investment_goals"),
+            risk_tolerance: row.get("risk_tolerance"),
+            time_horizon: row.get("time_horizon"),
+            liquidity_needs: row.get("liquidity_needs"),
+            income_needs: row.get("income_needs"),
+            investment_experience: row.get("investment_experience"),
+            restrictions: row.get("restrictions"),
+            preferred_sectors: row.get("preferred_sectors"),
+            avoided_sectors: row.get("avoided_sectors"),
+            notes: row.get("notes"),
+            created_at: row.get("created_at"),
+            updated_at: row.get("updated_at"),
         }
     }
 
@@ -983,6 +1370,18 @@ impl Database {
         }
     }
 
+    fn row_to_engine_event(row: sqlx::postgres::PgRow) -> EngineEvent {
+        EngineEvent {
+            id: row.get("id"),
+            engine_name: row.get("engine_name"),
+            event_type: row.get("event_type"),
+            symbol: row.get("symbol"),
+            message: row.get("message"),
+            timestamp: row.get("timestamp"),
+            created_at: row.get("created_at"),
+        }
+    }
+
     fn row_to_trader_event(row: sqlx::postgres::PgRow) -> TraderEvent {
         let payload = row
             .try_get::<Option<String>, _>("payload")
@@ -1019,6 +1418,100 @@ impl Database {
             reviewed_by: row.get("reviewed_by"),
             reviewed_at: row.get("reviewed_at"),
             resulting_order_id: row.get("resulting_order_id"),
+            created_at: row.get("created_at"),
+            updated_at: row.get("updated_at"),
+        }
+    }
+
+    fn row_to_trader_symbol(row: sqlx::postgres::PgRow) -> TraderSymbol {
+        TraderSymbol {
+            id: row.get("id"),
+            trader_id: row.get("trader_id"),
+            symbol: row.get("symbol"),
+            asset_type: row.get("asset_type"),
+            name: row.get("name"),
+            exchange: row.get("exchange"),
+            sector: row.get("sector"),
+            industry: row.get("industry"),
+            notes: row.get("notes"),
+            thesis: row.get("thesis"),
+            fit_score: row.get("fit_score"),
+            status: row.get("status"),
+            source: row.get("source"),
+            created_at: row.get("created_at"),
+            updated_at: row.get("updated_at"),
+        }
+    }
+
+    fn json_column_to_string(row: &sqlx::postgres::PgRow, column: &str) -> Option<String> {
+        row.try_get::<Option<String>, _>(column)
+            .ok()
+            .flatten()
+            .or_else(|| {
+                row.try_get::<Option<Value>, _>(column)
+                    .ok()
+                    .flatten()
+                    .map(|value| value.to_string())
+            })
+    }
+
+    fn row_to_trader_portfolio_proposal(row: sqlx::postgres::PgRow) -> TraderPortfolioProposal {
+        let proposed_actions_json = Self::json_column_to_string(&row, "proposed_actions_json")
+            .unwrap_or_else(|| "[]".to_string());
+        TraderPortfolioProposal {
+            id: row.get("id"),
+            trader_id: row.get("trader_id"),
+            paper_account_id: row.get("paper_account_id"),
+            title: row.get("title"),
+            summary: row.get("summary"),
+            thesis: row.get("thesis"),
+            status: row.get("status"),
+            plan_state: row.get("plan_state"),
+            confidence: row.get("confidence"),
+            proposed_actions_json,
+            source_snapshot_json: Self::json_column_to_string(&row, "source_snapshot_json"),
+            risk_snapshot_json: Self::json_column_to_string(&row, "risk_snapshot_json"),
+            market_snapshot_json: Self::json_column_to_string(&row, "market_snapshot_json"),
+            market_basis_json: Self::json_column_to_string(&row, "market_basis_json"),
+            invalidation_conditions_json: Self::json_column_to_string(
+                &row,
+                "invalidation_conditions_json",
+            ),
+            change_thresholds_json: Self::json_column_to_string(&row, "change_thresholds_json"),
+            replacement_reason: row.get("replacement_reason"),
+            created_at: row.get("created_at"),
+            updated_at: row.get("updated_at"),
+            reviewed_at: row.get("reviewed_at"),
+            review_note: row.get("review_note"),
+            accepted_at: row.get("accepted_at"),
+            active_until: row.get("active_until"),
+            expected_duration_seconds: row.get("expected_duration_seconds"),
+        }
+    }
+
+    fn row_to_trader_portfolio_proposal_action(
+        row: sqlx::postgres::PgRow,
+    ) -> TraderPortfolioProposalAction {
+        TraderPortfolioProposalAction {
+            id: row.get("id"),
+            proposal_id: row.get("proposal_id"),
+            trader_id: row.get("trader_id"),
+            symbol: row.get("symbol"),
+            action_type: row.get("action_type"),
+            side: row.get("side"),
+            quantity: row.get("quantity"),
+            order_type: row.get("order_type"),
+            entry_price: row.get("entry_price"),
+            exit_price: row.get("exit_price"),
+            limit_price: row.get("limit_price"),
+            stop_price: row.get("stop_price"),
+            expected_duration_seconds: row.get("expected_duration_seconds"),
+            enact_by: row.get("enact_by"),
+            market_price_at_creation: row.get("market_price_at_creation"),
+            rationale: row.get("rationale"),
+            confidence: row.get("confidence"),
+            risk_decision: row.get("risk_decision"),
+            status: row.get("status"),
             created_at: row.get("created_at"),
             updated_at: row.get("updated_at"),
         }
@@ -1095,6 +1588,20 @@ impl Database {
             message: row.get("message"),
             payload,
             created_at: row.get("created_at"),
+        }
+    }
+
+    fn row_to_data_source_script(row: sqlx::postgres::PgRow) -> DataSourceScript {
+        DataSourceScript {
+            data_source_id: row.get("data_source_id"),
+            language: row.get("language"),
+            script_text: row.get("script_text"),
+            script_hash: row.get("script_hash"),
+            last_build_status: row.get("last_build_status"),
+            last_build_output: row.get("last_build_output"),
+            last_built_at: row.get("last_built_at"),
+            created_at: row.get("created_at"),
+            updated_at: row.get("updated_at"),
         }
     }
 
@@ -2126,10 +2633,11 @@ impl Database {
             r#"
             INSERT INTO traders (
                 id, name, fundamental_perspective, freedom_level, status,
-                default_paper_account_id, is_active, created_at, updated_at, started_at, stopped_at
+                default_paper_account_id, persona, tone, communication_style,
+                is_active, created_at, updated_at, started_at, stopped_at
             ) VALUES (
-                $1::uuid, $2, $3, $4, $5, $6::uuid, $7, $8::timestamptz, $9::timestamptz,
-                $10::timestamptz, $11::timestamptz
+                $1::uuid, $2, $3, $4, $5, $6::uuid, $7, $8, $9, $10,
+                $11::timestamptz, $12::timestamptz, $13::timestamptz, $14::timestamptz
             )
             "#,
         )
@@ -2139,6 +2647,9 @@ impl Database {
         .bind(&trader.freedom_level)
         .bind(&trader.status)
         .bind(&trader.default_paper_account_id)
+        .bind(&trader.persona)
+        .bind(&trader.tone)
+        .bind(&trader.communication_style)
         .bind(trader.is_active)
         .bind(&trader.created_at)
         .bind(&trader.updated_at)
@@ -2169,6 +2680,7 @@ impl Database {
             r#"
             SELECT id::text AS id, name, fundamental_perspective, freedom_level, status,
                    default_paper_account_id::text AS default_paper_account_id, is_active,
+                   persona, tone, communication_style,
                    created_at::text AS created_at, updated_at::text AS updated_at,
                    started_at::text AS started_at, stopped_at::text AS stopped_at
             FROM traders
@@ -2187,6 +2699,7 @@ impl Database {
             r#"
             SELECT id::text AS id, name, fundamental_perspective, freedom_level, status,
                    default_paper_account_id::text AS default_paper_account_id, is_active,
+                   persona, tone, communication_style,
                    created_at::text AS created_at, updated_at::text AS updated_at,
                    started_at::text AS started_at, stopped_at::text AS stopped_at
             FROM traders
@@ -2198,6 +2711,95 @@ impl Database {
         .await?;
 
         Ok(row.map(Self::row_to_trader))
+    }
+
+    pub async fn get_trader_openai_api_key(
+        &self,
+        trader_id: &str,
+    ) -> Result<Option<String>, sqlx::Error> {
+        let row = sqlx::query(
+            r#"
+            SELECT openai_api_key_secret
+            FROM trader_secrets
+            WHERE trader_id = $1::uuid
+            "#,
+        )
+        .bind(trader_id)
+        .fetch_optional(&self.pool)
+        .await?;
+
+        Ok(row.map(|row| row.get("openai_api_key_secret")))
+    }
+
+    pub async fn list_recent_paper_orders_for_trader(
+        &self,
+        trader_id: &str,
+        limit: i64,
+    ) -> Result<Vec<PaperOrder>, sqlx::Error> {
+        let rows = sqlx::query(
+            r#"
+            SELECT
+                id::text AS id,
+                account_id::text AS account_id,
+                symbol,
+                side,
+                order_type,
+                quantity,
+                requested_price,
+                filled_quantity,
+                average_fill_price,
+                status,
+                source,
+                trader_id::text AS trader_id,
+                strategy_id,
+                signal_id::text AS signal_id,
+                proposal_id::text AS proposal_id,
+                created_at::text AS created_at,
+                updated_at::text AS updated_at
+            FROM paper_orders
+            WHERE trader_id = $1::uuid
+            ORDER BY created_at DESC, id DESC
+            LIMIT $2
+            "#,
+        )
+        .bind(trader_id)
+        .bind(limit)
+        .fetch_all(&self.pool)
+        .await?;
+
+        Ok(rows.into_iter().map(Self::row_to_paper_order).collect())
+    }
+
+    pub async fn list_recent_paper_fills_for_trader(
+        &self,
+        trader_id: &str,
+        limit: i64,
+    ) -> Result<Vec<PaperFill>, sqlx::Error> {
+        let rows = sqlx::query(
+            r#"
+            SELECT
+                pf.id::text AS id,
+                pf.account_id::text AS account_id,
+                pf.order_id::text AS order_id,
+                pf.symbol,
+                pf.side,
+                pf.quantity,
+                pf.price,
+                pf.notional,
+                pf.created_at::text AS created_at
+            FROM paper_fills pf
+            INNER JOIN paper_orders po ON po.id = pf.order_id
+            WHERE po.trader_id = $1::uuid
+            ORDER BY pf.created_at DESC, pf.id DESC
+            LIMIT $2
+            "#,
+        )
+        .bind(trader_id)
+        .bind(limit)
+        .fetch_all(&self.pool)
+        .await?;
+
+        Ok(rows.into_iter().map(Self::row_to_paper_fill).collect())
     }
 
     pub async fn update_trader(
@@ -2224,6 +2826,7 @@ impl Database {
             WHERE id = $1::uuid AND is_active = TRUE
             RETURNING id::text AS id, name, fundamental_perspective, freedom_level, status,
                       default_paper_account_id::text AS default_paper_account_id, is_active,
+                      persona, tone, communication_style,
                       created_at::text AS created_at, updated_at::text AS updated_at,
                       started_at::text AS started_at, stopped_at::text AS stopped_at
             "#,
@@ -2280,6 +2883,7 @@ impl Database {
             WHERE id = $1::uuid AND is_active = TRUE
             RETURNING id::text AS id, name, fundamental_perspective, freedom_level, status,
                       default_paper_account_id::text AS default_paper_account_id, is_active,
+                      persona, tone, communication_style,
                       created_at::text AS created_at, updated_at::text AS updated_at,
                       started_at::text AS started_at, stopped_at::text AS stopped_at
             "#,
@@ -2600,6 +3204,624 @@ impl Database {
         Ok(row.map(Self::row_to_trader_trade_proposal))
     }
 
+    pub async fn list_trader_symbols(
+        &self,
+        trader_id: &str,
+        status: Option<&str>,
+        asset_type: Option<&str>,
+        source: Option<&str>,
+    ) -> Result<Vec<TraderSymbol>, sqlx::Error> {
+        let mut query = QueryBuilder::<Postgres>::new(
+            r#"
+            SELECT id::text AS id, trader_id::text AS trader_id, symbol, asset_type,
+                   name, exchange, sector, industry, notes, thesis, fit_score, status,
+                   source, created_at::text AS created_at, updated_at::text AS updated_at
+            FROM trader_symbols
+            WHERE trader_id =
+            "#,
+        );
+        query.push_bind(trader_id);
+        query.push("::uuid");
+
+        if let Some(status) = status {
+            query.push(" AND status = ");
+            query.push_bind(status);
+        }
+        if let Some(asset_type) = asset_type {
+            query.push(" AND asset_type = ");
+            query.push_bind(asset_type);
+        }
+        if let Some(source) = source {
+            query.push(" AND source = ");
+            query.push_bind(source);
+        }
+
+        query.push(
+            r#"
+            ORDER BY
+                CASE status
+                    WHEN 'active' THEN 1
+                    WHEN 'watching' THEN 2
+                    WHEN 'candidate' THEN 3
+                    WHEN 'rejected' THEN 4
+                    WHEN 'archived' THEN 5
+                    ELSE 6
+                END,
+                fit_score DESC NULLS LAST,
+                symbol ASC
+            "#,
+        );
+
+        let rows = query.build().fetch_all(&self.pool).await?;
+        Ok(rows.into_iter().map(Self::row_to_trader_symbol).collect())
+    }
+
+    pub async fn upsert_trader_symbol(
+        &self,
+        trader_id: &str,
+        request: &CreateTraderSymbolRequest,
+    ) -> Result<TraderSymbol, sqlx::Error> {
+        let now = Self::now_string();
+        let symbol = request.symbol.trim().to_ascii_uppercase();
+        let asset_type = request.asset_type.as_deref().unwrap_or("stock").trim();
+        let status = request.status.as_deref().unwrap_or("watching").trim();
+        let source = request.source.as_deref().unwrap_or("manual").trim();
+        let row = sqlx::query(
+            r#"
+            INSERT INTO trader_symbols (
+                id, trader_id, symbol, asset_type, name, exchange, sector, industry,
+                notes, thesis, fit_score, status, source, created_at, updated_at
+            ) VALUES (
+                $1::uuid, $2::uuid, $3, $4, $5, $6, $7, $8, $9, $10, $11,
+                $12, $13, $14::timestamptz, $15::timestamptz
+            )
+            ON CONFLICT (trader_id, symbol) DO UPDATE SET
+                asset_type = EXCLUDED.asset_type,
+                name = COALESCE(EXCLUDED.name, trader_symbols.name),
+                exchange = COALESCE(EXCLUDED.exchange, trader_symbols.exchange),
+                sector = COALESCE(EXCLUDED.sector, trader_symbols.sector),
+                industry = COALESCE(EXCLUDED.industry, trader_symbols.industry),
+                notes = COALESCE(EXCLUDED.notes, trader_symbols.notes),
+                thesis = COALESCE(EXCLUDED.thesis, trader_symbols.thesis),
+                fit_score = COALESCE(EXCLUDED.fit_score, trader_symbols.fit_score),
+                status = EXCLUDED.status,
+                source = EXCLUDED.source,
+                updated_at = EXCLUDED.updated_at
+            RETURNING id::text AS id, trader_id::text AS trader_id, symbol, asset_type,
+                      name, exchange, sector, industry, notes, thesis, fit_score, status,
+                      source, created_at::text AS created_at, updated_at::text AS updated_at
+            "#,
+        )
+        .bind(Self::new_id())
+        .bind(trader_id)
+        .bind(symbol)
+        .bind(asset_type)
+        .bind(
+            request
+                .name
+                .as_deref()
+                .map(str::trim)
+                .filter(|value| !value.is_empty()),
+        )
+        .bind(
+            request
+                .exchange
+                .as_deref()
+                .map(str::trim)
+                .filter(|value| !value.is_empty()),
+        )
+        .bind(
+            request
+                .sector
+                .as_deref()
+                .map(str::trim)
+                .filter(|value| !value.is_empty()),
+        )
+        .bind(
+            request
+                .industry
+                .as_deref()
+                .map(str::trim)
+                .filter(|value| !value.is_empty()),
+        )
+        .bind(
+            request
+                .notes
+                .as_deref()
+                .map(str::trim)
+                .filter(|value| !value.is_empty()),
+        )
+        .bind(
+            request
+                .thesis
+                .as_deref()
+                .map(str::trim)
+                .filter(|value| !value.is_empty()),
+        )
+        .bind(request.fit_score)
+        .bind(status)
+        .bind(source)
+        .bind(&now)
+        .bind(&now)
+        .fetch_one(&self.pool)
+        .await?;
+
+        Ok(Self::row_to_trader_symbol(row))
+    }
+
+    pub async fn update_trader_symbol(
+        &self,
+        trader_id: &str,
+        symbol_id: &str,
+        request: &UpdateTraderSymbolRequest,
+    ) -> Result<Option<TraderSymbol>, sqlx::Error> {
+        let now = Self::now_string();
+        let row = sqlx::query(
+            r#"
+            UPDATE trader_symbols
+            SET asset_type = COALESCE($3, asset_type),
+                name = COALESCE($4, name),
+                exchange = COALESCE($5, exchange),
+                sector = COALESCE($6, sector),
+                industry = COALESCE($7, industry),
+                notes = COALESCE($8, notes),
+                thesis = COALESCE($9, thesis),
+                fit_score = COALESCE($10, fit_score),
+                status = COALESCE($11, status),
+                updated_at = $12::timestamptz
+            WHERE trader_id = $1::uuid AND id = $2::uuid
+            RETURNING id::text AS id, trader_id::text AS trader_id, symbol, asset_type,
+                      name, exchange, sector, industry, notes, thesis, fit_score, status,
+                      source, created_at::text AS created_at, updated_at::text AS updated_at
+            "#,
+        )
+        .bind(trader_id)
+        .bind(symbol_id)
+        .bind(request.asset_type.as_deref().map(str::trim))
+        .bind(request.name.as_deref().map(str::trim))
+        .bind(request.exchange.as_deref().map(str::trim))
+        .bind(request.sector.as_deref().map(str::trim))
+        .bind(request.industry.as_deref().map(str::trim))
+        .bind(request.notes.as_deref().map(str::trim))
+        .bind(request.thesis.as_deref().map(str::trim))
+        .bind(request.fit_score)
+        .bind(request.status.as_deref().map(str::trim))
+        .bind(&now)
+        .fetch_optional(&self.pool)
+        .await?;
+
+        Ok(row.map(Self::row_to_trader_symbol))
+    }
+
+    pub async fn set_trader_symbol_status(
+        &self,
+        trader_id: &str,
+        symbol_id: &str,
+        status: &str,
+    ) -> Result<Option<TraderSymbol>, sqlx::Error> {
+        self.update_trader_symbol(
+            trader_id,
+            symbol_id,
+            &UpdateTraderSymbolRequest {
+                status: Some(status.to_string()),
+                ..Default::default()
+            },
+        )
+        .await
+    }
+
+    pub async fn create_trader_portfolio_proposal(
+        &self,
+        trader_id: &str,
+        request: &CreateTraderPortfolioProposalRequest,
+    ) -> Result<TraderPortfolioProposalDetail, sqlx::Error> {
+        let mut tx = self.pool.begin().await?;
+        let now = Self::now_string();
+        let proposal_id = Self::new_id();
+        let proposed_actions_json =
+            serde_json::to_string(&request.proposed_actions).unwrap_or_else(|_| "[]".to_string());
+
+        sqlx::query(
+            r#"
+            UPDATE trader_portfolio_proposals
+            SET status = 'superseded', plan_state = 'superseded', updated_at = $2::timestamptz
+            WHERE trader_id = $1::uuid AND status = 'proposed'
+            "#,
+        )
+        .bind(trader_id)
+        .bind(&now)
+        .execute(&mut *tx)
+        .await?;
+
+        let proposal_row = sqlx::query(
+            r#"
+            INSERT INTO trader_portfolio_proposals (
+                id, trader_id, paper_account_id, title, summary, thesis, status, plan_state,
+                confidence, proposed_actions_json, source_snapshot_json, risk_snapshot_json,
+                market_snapshot_json, market_basis_json, invalidation_conditions_json,
+                change_thresholds_json, replacement_reason, expected_duration_seconds,
+                created_at, updated_at
+            ) VALUES (
+                $1::uuid, $2::uuid, $3::uuid, $4, $5, $6, 'proposed', 'draft',
+                $7, $8::jsonb, $9::jsonb, $10::jsonb, $11::jsonb, $12::jsonb,
+                $13::jsonb, $14::jsonb, $15, $16, $17::timestamptz, $18::timestamptz
+            )
+            RETURNING id::text AS id, trader_id::text AS trader_id,
+                      paper_account_id::text AS paper_account_id, title, summary, thesis,
+                      status, plan_state, confidence, proposed_actions_json, source_snapshot_json,
+                      risk_snapshot_json, market_snapshot_json,
+                      market_basis_json, invalidation_conditions_json, change_thresholds_json,
+                      replacement_reason,
+                      created_at::text AS created_at, updated_at::text AS updated_at,
+                      reviewed_at::text AS reviewed_at, review_note,
+                      accepted_at::text AS accepted_at, active_until::text AS active_until,
+                      expected_duration_seconds
+            "#,
+        )
+        .bind(&proposal_id)
+        .bind(trader_id)
+        .bind(&request.paper_account_id)
+        .bind(request.title.trim())
+        .bind(request.summary.trim())
+        .bind(request.thesis.trim())
+        .bind(request.confidence)
+        .bind(&proposed_actions_json)
+        .bind(&request.source_snapshot_json)
+        .bind(&request.risk_snapshot_json)
+        .bind(&request.market_snapshot_json)
+        .bind(&request.market_basis_json)
+        .bind(&request.invalidation_conditions_json)
+        .bind(&request.change_thresholds_json)
+        .bind(&request.replacement_reason)
+        .bind(request.expected_duration_seconds)
+        .bind(&now)
+        .bind(&now)
+        .fetch_one(&mut *tx)
+        .await?;
+
+        let mut actions = Vec::new();
+        for action in &request.proposed_actions {
+            actions.push(
+                Self::insert_trader_portfolio_proposal_action_in_tx(
+                    &mut tx,
+                    &proposal_id,
+                    trader_id,
+                    action,
+                    &now,
+                )
+                .await?,
+            );
+        }
+
+        Self::insert_trader_event_in_tx(
+            &mut tx,
+            trader_id,
+            "proposal_created",
+            &format!("Created portfolio proposal {}", request.title.trim()),
+            Some(&format!(r#"{{"proposal_id":"{}"}}"#, proposal_id)),
+        )
+        .await?;
+
+        tx.commit().await?;
+        Ok(TraderPortfolioProposalDetail {
+            proposal: Self::row_to_trader_portfolio_proposal(proposal_row),
+            actions,
+        })
+    }
+
+    async fn insert_trader_portfolio_proposal_action_in_tx(
+        tx: &mut Transaction<'_, Postgres>,
+        proposal_id: &str,
+        trader_id: &str,
+        action: &CreateTraderPortfolioProposalActionRequest,
+        now: &str,
+    ) -> Result<TraderPortfolioProposalAction, sqlx::Error> {
+        let row = sqlx::query(
+            r#"
+            INSERT INTO trader_portfolio_proposal_actions (
+                id, proposal_id, trader_id, symbol, action_type, side, quantity,
+                order_type, entry_price, exit_price, limit_price, stop_price,
+                expected_duration_seconds, enact_by, market_price_at_creation,
+                rationale, confidence, risk_decision, status, created_at, updated_at
+            ) VALUES (
+                $1::uuid, $2::uuid, $3::uuid, $4, $5, $6, $7, $8, $9, $10,
+                $11, $12, $13, $14::timestamptz, $15, $16, $17, $18,
+                'proposed', $19::timestamptz, $20::timestamptz
+            )
+            RETURNING id::text AS id, proposal_id::text AS proposal_id, trader_id::text AS trader_id,
+                      symbol, action_type, side, quantity, order_type, entry_price, exit_price,
+                      limit_price, stop_price, expected_duration_seconds, enact_by::text AS enact_by,
+                      market_price_at_creation, rationale, confidence,
+                      risk_decision, status, created_at::text AS created_at, updated_at::text AS updated_at
+            "#,
+        )
+        .bind(Self::new_id())
+        .bind(proposal_id)
+        .bind(trader_id)
+        .bind(
+            action
+                .symbol
+                .as_deref()
+                .map(str::trim)
+                .filter(|value| !value.is_empty())
+                .map(str::to_ascii_uppercase),
+        )
+        .bind(action.action_type.trim())
+        .bind(action.side.as_deref().map(str::trim))
+        .bind(action.quantity)
+        .bind(action.order_type.as_deref().map(str::trim))
+        .bind(action.entry_price)
+        .bind(action.exit_price)
+        .bind(action.limit_price)
+        .bind(action.stop_price)
+        .bind(action.expected_duration_seconds)
+        .bind(&action.enact_by)
+        .bind(action.market_price_at_creation)
+        .bind(action.rationale.trim())
+        .bind(action.confidence)
+        .bind(action.risk_decision.as_deref().map(str::trim))
+        .bind(now)
+        .bind(now)
+        .fetch_one(&mut **tx)
+        .await?;
+        Ok(Self::row_to_trader_portfolio_proposal_action(row))
+    }
+
+    pub async fn list_trader_portfolio_proposals(
+        &self,
+        trader_id: &str,
+    ) -> Result<Vec<TraderPortfolioProposalDetail>, sqlx::Error> {
+        let rows = sqlx::query(
+            r#"
+            SELECT id::text AS id, trader_id::text AS trader_id,
+                   paper_account_id::text AS paper_account_id, title, summary, thesis,
+                   status, plan_state, confidence, proposed_actions_json, source_snapshot_json,
+                   risk_snapshot_json, market_snapshot_json, market_basis_json,
+                   invalidation_conditions_json, change_thresholds_json, replacement_reason,
+                   created_at::text AS created_at, updated_at::text AS updated_at,
+                   reviewed_at::text AS reviewed_at, review_note,
+                   accepted_at::text AS accepted_at, active_until::text AS active_until,
+                   expected_duration_seconds
+            FROM trader_portfolio_proposals
+            WHERE trader_id = $1::uuid
+            ORDER BY created_at DESC, id DESC
+            LIMIT 100
+            "#,
+        )
+        .bind(trader_id)
+        .fetch_all(&self.pool)
+        .await?;
+
+        let mut details = Vec::new();
+        for row in rows {
+            let proposal = Self::row_to_trader_portfolio_proposal(row);
+            let actions = self
+                .list_trader_portfolio_proposal_actions(&proposal.id)
+                .await?;
+            details.push(TraderPortfolioProposalDetail { proposal, actions });
+        }
+        Ok(details)
+    }
+
+    pub async fn get_latest_trader_portfolio_proposal(
+        &self,
+        trader_id: &str,
+    ) -> Result<Option<TraderPortfolioProposalDetail>, sqlx::Error> {
+        let row = sqlx::query(
+            r#"
+            SELECT id::text AS id, trader_id::text AS trader_id,
+                   paper_account_id::text AS paper_account_id, title, summary, thesis,
+                   status, plan_state, confidence, proposed_actions_json, source_snapshot_json,
+                   risk_snapshot_json, market_snapshot_json, market_basis_json,
+                   invalidation_conditions_json, change_thresholds_json, replacement_reason,
+                   created_at::text AS created_at, updated_at::text AS updated_at,
+                   reviewed_at::text AS reviewed_at, review_note,
+                   accepted_at::text AS accepted_at, active_until::text AS active_until,
+                   expected_duration_seconds
+            FROM trader_portfolio_proposals
+            WHERE trader_id = $1::uuid AND status <> 'superseded'
+            ORDER BY created_at DESC, id DESC
+            LIMIT 1
+            "#,
+        )
+        .bind(trader_id)
+        .fetch_optional(&self.pool)
+        .await?;
+        let Some(row) = row else {
+            return Ok(None);
+        };
+        let proposal = Self::row_to_trader_portfolio_proposal(row);
+        let actions = self
+            .list_trader_portfolio_proposal_actions(&proposal.id)
+            .await?;
+        Ok(Some(TraderPortfolioProposalDetail { proposal, actions }))
+    }
+
+    pub async fn get_active_trader_portfolio_proposal(
+        &self,
+        trader_id: &str,
+    ) -> Result<Option<TraderPortfolioProposalDetail>, sqlx::Error> {
+        let row = sqlx::query(
+            r#"
+            SELECT id::text AS id, trader_id::text AS trader_id,
+                   paper_account_id::text AS paper_account_id, title, summary, thesis,
+                   status, plan_state, confidence, proposed_actions_json, source_snapshot_json,
+                   risk_snapshot_json, market_snapshot_json, market_basis_json,
+                   invalidation_conditions_json, change_thresholds_json, replacement_reason,
+                   created_at::text AS created_at, updated_at::text AS updated_at,
+                   reviewed_at::text AS reviewed_at, review_note,
+                   accepted_at::text AS accepted_at, active_until::text AS active_until,
+                   expected_duration_seconds
+            FROM trader_portfolio_proposals
+            WHERE trader_id = $1::uuid AND status = 'accepted' AND plan_state = 'active'
+            ORDER BY accepted_at DESC NULLS LAST, created_at DESC, id DESC
+            LIMIT 1
+            "#,
+        )
+        .bind(trader_id)
+        .fetch_optional(&self.pool)
+        .await?;
+        let Some(row) = row else {
+            return Ok(None);
+        };
+        let proposal = Self::row_to_trader_portfolio_proposal(row);
+        let actions = self
+            .list_trader_portfolio_proposal_actions(&proposal.id)
+            .await?;
+        Ok(Some(TraderPortfolioProposalDetail { proposal, actions }))
+    }
+
+    pub async fn get_trader_portfolio_proposal(
+        &self,
+        trader_id: &str,
+        proposal_id: &str,
+    ) -> Result<Option<TraderPortfolioProposalDetail>, sqlx::Error> {
+        let row = sqlx::query(
+            r#"
+            SELECT id::text AS id, trader_id::text AS trader_id,
+                   paper_account_id::text AS paper_account_id, title, summary, thesis,
+                   status, plan_state, confidence, proposed_actions_json, source_snapshot_json,
+                   risk_snapshot_json, market_snapshot_json, market_basis_json,
+                   invalidation_conditions_json, change_thresholds_json, replacement_reason,
+                   created_at::text AS created_at, updated_at::text AS updated_at,
+                   reviewed_at::text AS reviewed_at, review_note,
+                   accepted_at::text AS accepted_at, active_until::text AS active_until,
+                   expected_duration_seconds
+            FROM trader_portfolio_proposals
+            WHERE trader_id = $1::uuid AND id = $2::uuid
+            "#,
+        )
+        .bind(trader_id)
+        .bind(proposal_id)
+        .fetch_optional(&self.pool)
+        .await?;
+        let Some(row) = row else {
+            return Ok(None);
+        };
+        let proposal = Self::row_to_trader_portfolio_proposal(row);
+        let actions = self
+            .list_trader_portfolio_proposal_actions(&proposal.id)
+            .await?;
+        Ok(Some(TraderPortfolioProposalDetail { proposal, actions }))
+    }
+
+    async fn list_trader_portfolio_proposal_actions(
+        &self,
+        proposal_id: &str,
+    ) -> Result<Vec<TraderPortfolioProposalAction>, sqlx::Error> {
+        let rows = sqlx::query(
+            r#"
+            SELECT id::text AS id, proposal_id::text AS proposal_id, trader_id::text AS trader_id,
+                   symbol, action_type, side, quantity, order_type, entry_price, exit_price,
+                   limit_price, stop_price, expected_duration_seconds, enact_by::text AS enact_by,
+                   market_price_at_creation, rationale, confidence,
+                   risk_decision, status, created_at::text AS created_at, updated_at::text AS updated_at
+            FROM trader_portfolio_proposal_actions
+            WHERE proposal_id = $1::uuid
+            ORDER BY created_at ASC, id ASC
+            "#,
+        )
+        .bind(proposal_id)
+        .fetch_all(&self.pool)
+        .await?;
+        Ok(rows
+            .into_iter()
+            .map(Self::row_to_trader_portfolio_proposal_action)
+            .collect())
+    }
+
+    pub async fn review_trader_portfolio_proposal(
+        &self,
+        trader_id: &str,
+        proposal_id: &str,
+        status: &str,
+        review_note: Option<&str>,
+    ) -> Result<Option<TraderPortfolioProposalDetail>, sqlx::Error> {
+        let mut tx = self.pool.begin().await?;
+        let now = Self::now_string();
+        if status == "accepted" {
+            sqlx::query(
+                r#"
+                UPDATE trader_portfolio_proposals
+                SET plan_state = 'superseded', status = 'superseded', updated_at = $2::timestamptz
+                WHERE trader_id = $1::uuid AND plan_state = 'active'
+                "#,
+            )
+            .bind(trader_id)
+            .bind(&now)
+            .execute(&mut *tx)
+            .await?;
+        }
+        let plan_state = match status {
+            "accepted" => "active",
+            "rejected" => "rejected",
+            "superseded" => "superseded",
+            "expired" => "invalidated",
+            "executed" => "completed",
+            _ => "draft",
+        };
+        let row = sqlx::query(
+            r#"
+            UPDATE trader_portfolio_proposals
+            SET status = $3,
+                plan_state = $4,
+                accepted_at = CASE WHEN $3 = 'accepted' THEN $5::timestamptz ELSE accepted_at END,
+                active_until = CASE
+                    WHEN $3 = 'accepted' AND expected_duration_seconds IS NOT NULL
+                    THEN $5::timestamptz + (expected_duration_seconds || ' seconds')::interval
+                    ELSE active_until
+                END,
+                reviewed_at = $5::timestamptz,
+                review_note = $6,
+                updated_at = $5::timestamptz
+            WHERE trader_id = $1::uuid AND id = $2::uuid
+            RETURNING id::text AS id, trader_id::text AS trader_id,
+                      paper_account_id::text AS paper_account_id, title, summary, thesis,
+                      status, plan_state, confidence, proposed_actions_json, source_snapshot_json,
+                      risk_snapshot_json, market_snapshot_json, market_basis_json,
+                      invalidation_conditions_json, change_thresholds_json, replacement_reason,
+                      created_at::text AS created_at, updated_at::text AS updated_at,
+                      reviewed_at::text AS reviewed_at, review_note,
+                      accepted_at::text AS accepted_at, active_until::text AS active_until,
+                      expected_duration_seconds
+            "#,
+        )
+        .bind(trader_id)
+        .bind(proposal_id)
+        .bind(status)
+        .bind(plan_state)
+        .bind(&now)
+        .bind(review_note)
+        .fetch_optional(&mut *tx)
+        .await?;
+
+        let Some(row) = row else {
+            return Ok(None);
+        };
+        let proposal = Self::row_to_trader_portfolio_proposal(row);
+        let action_rows = sqlx::query(
+            r#"
+            SELECT id::text AS id, proposal_id::text AS proposal_id, trader_id::text AS trader_id,
+                   symbol, action_type, side, quantity, order_type, entry_price, exit_price,
+                   limit_price, stop_price, expected_duration_seconds, enact_by::text AS enact_by,
+                   market_price_at_creation, rationale, confidence,
+                   risk_decision, status, created_at::text AS created_at, updated_at::text AS updated_at
+            FROM trader_portfolio_proposal_actions
+            WHERE proposal_id = $1::uuid
+            ORDER BY created_at ASC, id ASC
+            "#,
+        )
+        .bind(&proposal.id)
+        .fetch_all(&mut *tx)
+        .await?;
+        tx.commit().await?;
+        let actions = action_rows
+            .into_iter()
+            .map(Self::row_to_trader_portfolio_proposal_action)
+            .collect();
+        Ok(Some(TraderPortfolioProposalDetail { proposal, actions }))
+    }
+
     pub async fn list_engine_trader_configs(
         &self,
     ) -> Result<Vec<EngineRunnableTrader>, sqlx::Error> {
@@ -2607,6 +3829,7 @@ impl Database {
             r#"
             SELECT t.id::text AS id, t.name, t.fundamental_perspective, t.freedom_level,
                    t.default_paper_account_id::text AS default_paper_account_id,
+                   t.persona, t.tone, t.communication_style,
                    s.openai_api_key_secret
             FROM traders t
             INNER JOIN trader_secrets s ON s.trader_id = t.id
@@ -2626,13 +3849,474 @@ impl Database {
                 fundamental_perspective: row.get("fundamental_perspective"),
                 freedom_level: row.get("freedom_level"),
                 default_paper_account_id: row.get("default_paper_account_id"),
+                persona: row.try_get("persona").ok(),
+                tone: row.try_get("tone").ok(),
+                communication_style: row.try_get("communication_style").ok(),
                 info_sources: self.list_trader_info_sources(&id).await?,
                 data_sources: self.list_engine_trader_data_sources(&id).await?,
+                tracked_symbols: self
+                    .list_trader_symbols(&id, None, None, None)
+                    .await?
+                    .into_iter()
+                    .filter(|symbol| symbol.status == "active" || symbol.status == "watching")
+                    .collect(),
                 openai_api_key: row.get("openai_api_key_secret"),
             });
         }
 
         Ok(traders)
+    }
+
+    pub async fn list_channels(&self) -> Result<Vec<Channel>, sqlx::Error> {
+        let rows = sqlx::query(
+            r#"
+            SELECT id, name, display_name, description, is_system, created_at, updated_at
+            FROM channels
+            ORDER BY
+                CASE name
+                    WHEN 'general' THEN 0
+                    WHEN 'data_analysis' THEN 1
+                    WHEN 'trading' THEN 2
+                    ELSE 3
+                END,
+                display_name ASC
+            "#,
+        )
+        .fetch_all(&self.pool)
+        .await?;
+        Ok(rows.into_iter().map(Self::row_to_channel).collect())
+    }
+
+    pub async fn get_channel(&self, channel_id: &str) -> Result<Option<Channel>, sqlx::Error> {
+        let row = sqlx::query(
+            r#"
+            SELECT id, name, display_name, description, is_system, created_at, updated_at
+            FROM channels
+            WHERE id = $1 OR name = $1
+            "#,
+        )
+        .bind(channel_id)
+        .fetch_optional(&self.pool)
+        .await?;
+        Ok(row.map(Self::row_to_channel))
+    }
+
+    pub async fn list_channel_messages(
+        &self,
+        channel_id: &str,
+        limit: Option<i64>,
+        before: Option<&str>,
+        after: Option<&str>,
+    ) -> Result<Vec<ChannelMessage>, sqlx::Error> {
+        let rows = sqlx::query(
+            r#"
+            SELECT id, channel_id, author_type, author_id, author_name, role,
+                   content_markdown, metadata_json, created_at
+            FROM channel_messages
+            WHERE channel_id = $1
+              AND ($2::text IS NULL OR created_at < $2)
+              AND ($3::text IS NULL OR created_at > $3)
+            ORDER BY created_at ASC, id ASC
+            LIMIT $4
+            "#,
+        )
+        .bind(channel_id)
+        .bind(before)
+        .bind(after)
+        .bind(limit.unwrap_or(200).clamp(1, 500))
+        .fetch_all(&self.pool)
+        .await?;
+        Ok(rows.into_iter().map(Self::row_to_channel_message).collect())
+    }
+
+    pub async fn create_channel_message(
+        &self,
+        channel_id: &str,
+        request: &CreateChannelMessageRequest,
+    ) -> Result<ChannelMessage, sqlx::Error> {
+        let row = sqlx::query(
+            r#"
+            INSERT INTO channel_messages (
+                id, channel_id, author_type, author_id, author_name, role,
+                content_markdown, metadata_json, created_at
+            ) VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9)
+            RETURNING id, channel_id, author_type, author_id, author_name, role,
+                      content_markdown, metadata_json, created_at
+            "#,
+        )
+        .bind(Self::new_id())
+        .bind(channel_id)
+        .bind(request.author_type.trim())
+        .bind(
+            request
+                .author_id
+                .as_deref()
+                .map(str::trim)
+                .filter(|value| !value.is_empty()),
+        )
+        .bind(
+            request
+                .author_name
+                .as_deref()
+                .map(str::trim)
+                .filter(|value| !value.is_empty())
+                .unwrap_or("Unknown"),
+        )
+        .bind(request.role.as_deref().unwrap_or("message").trim())
+        .bind(request.content_markdown.trim())
+        .bind(request.metadata_json.as_deref())
+        .bind(Self::now_string())
+        .fetch_one(&self.pool)
+        .await?;
+        Ok(Self::row_to_channel_message(row))
+    }
+
+    pub async fn clear_channel_messages(&self) -> Result<u64, sqlx::Error> {
+        let result = sqlx::query("DELETE FROM channel_messages")
+            .execute(&self.pool)
+            .await?;
+        Ok(result.rows_affected())
+    }
+
+    pub async fn latest_channel_message_for_author(
+        &self,
+        channel_id: &str,
+        author_type: &str,
+        author_id: Option<&str>,
+    ) -> Result<Option<ChannelMessage>, sqlx::Error> {
+        let row = sqlx::query(
+            r#"
+            SELECT id, channel_id, author_type, author_id, author_name, role,
+                   content_markdown, metadata_json, created_at
+            FROM channel_messages
+            WHERE channel_id = $1
+              AND author_type = $2
+              AND (($3::text IS NULL AND author_id IS NULL) OR author_id = $3)
+            ORDER BY created_at DESC, id DESC
+            LIMIT 1
+            "#,
+        )
+        .bind(channel_id)
+        .bind(author_type)
+        .bind(author_id)
+        .fetch_optional(&self.pool)
+        .await?;
+        Ok(row.map(Self::row_to_channel_message))
+    }
+
+    pub async fn get_trader_persona(
+        &self,
+        trader_id: &str,
+    ) -> Result<Option<TraderPersona>, sqlx::Error> {
+        let row = sqlx::query(
+            r#"
+            SELECT id::text AS trader_id, persona, tone, communication_style
+            FROM traders
+            WHERE id = $1::uuid AND is_active = TRUE
+            "#,
+        )
+        .bind(trader_id)
+        .fetch_optional(&self.pool)
+        .await?;
+        Ok(row.map(|row| TraderPersona {
+            trader_id: row.get("trader_id"),
+            persona: row.get("persona"),
+            tone: row.get("tone"),
+            communication_style: row.get("communication_style"),
+        }))
+    }
+
+    pub async fn update_trader_persona(
+        &self,
+        trader_id: &str,
+        request: &TraderPersonaUpdateRequest,
+    ) -> Result<Option<TraderPersona>, sqlx::Error> {
+        let now = Self::now_string();
+        let row = sqlx::query(
+            r#"
+            UPDATE traders
+            SET persona = COALESCE($2, persona),
+                tone = COALESCE($3, tone),
+                communication_style = COALESCE($4, communication_style),
+                updated_at = $5::timestamptz
+            WHERE id = $1::uuid AND is_active = TRUE
+            RETURNING id::text AS trader_id, persona, tone, communication_style
+            "#,
+        )
+        .bind(trader_id)
+        .bind(request.persona.as_deref())
+        .bind(request.tone.as_deref())
+        .bind(request.communication_style.as_deref())
+        .bind(&now)
+        .fetch_optional(&self.pool)
+        .await?;
+        Ok(row.map(|row| TraderPersona {
+            trader_id: row.get("trader_id"),
+            persona: row.get("persona"),
+            tone: row.get("tone"),
+            communication_style: row.get("communication_style"),
+        }))
+    }
+
+    pub async fn get_md_profile(&self) -> Result<MdProfile, sqlx::Error> {
+        self.seed_md_profile().await?;
+        let row = sqlx::query(
+            r#"
+            SELECT id, name, persona, tone, communication_style, created_at, updated_at
+            FROM md_profile
+            WHERE id = 'default'
+            "#,
+        )
+        .fetch_one(&self.pool)
+        .await?;
+        Ok(Self::row_to_md_profile(row))
+    }
+
+    pub async fn update_md_profile(
+        &self,
+        request: &UpdateMdProfileRequest,
+    ) -> Result<MdProfile, sqlx::Error> {
+        let now = Self::now_string();
+        let row = sqlx::query(
+            r#"
+            UPDATE md_profile
+            SET name = COALESCE($1, name),
+                persona = COALESCE($2, persona),
+                tone = COALESCE($3, tone),
+                communication_style = COALESCE($4, communication_style),
+                openai_api_key_secret = CASE WHEN $5 THEN $6 ELSE openai_api_key_secret END,
+                updated_at = $7
+            WHERE id = 'default'
+            RETURNING id, name, persona, tone, communication_style, created_at, updated_at
+            "#,
+        )
+        .bind(request.name.as_deref())
+        .bind(request.persona.as_deref())
+        .bind(request.tone.as_deref())
+        .bind(request.communication_style.as_deref())
+        .bind(
+            request
+                .openai_api_key
+                .as_deref()
+                .map(str::trim)
+                .filter(|value| !value.is_empty())
+                .is_some(),
+        )
+        .bind(
+            request
+                .openai_api_key
+                .as_deref()
+                .map(str::trim)
+                .filter(|value| !value.is_empty()),
+        )
+        .bind(&now)
+        .fetch_one(&self.pool)
+        .await?;
+        Ok(Self::row_to_md_profile(row))
+    }
+
+    pub async fn get_data_scientist_profile(&self) -> Result<DataScientistProfile, sqlx::Error> {
+        self.seed_data_scientist_profile().await?;
+        let row = sqlx::query(
+            r#"
+            SELECT id, name, persona, tone, communication_style, created_at, updated_at
+            FROM data_scientist_profile
+            WHERE id = 'default'
+            "#,
+        )
+        .fetch_one(&self.pool)
+        .await?;
+        Ok(Self::row_to_data_scientist_profile(row))
+    }
+
+    pub async fn update_data_scientist_profile(
+        &self,
+        request: &UpdateDataScientistProfileRequest,
+    ) -> Result<DataScientistProfile, sqlx::Error> {
+        let now = Self::now_string();
+        let row = sqlx::query(
+            r#"
+            UPDATE data_scientist_profile
+            SET name = COALESCE($1, name),
+                persona = COALESCE($2, persona),
+                tone = COALESCE($3, tone),
+                communication_style = COALESCE($4, communication_style),
+                openai_api_key_secret = CASE WHEN $5 THEN $6 ELSE openai_api_key_secret END,
+                updated_at = $7
+            WHERE id = 'default'
+            RETURNING id, name, persona, tone, communication_style, created_at, updated_at
+            "#,
+        )
+        .bind(request.name.as_deref())
+        .bind(request.persona.as_deref())
+        .bind(request.tone.as_deref())
+        .bind(request.communication_style.as_deref())
+        .bind(
+            request
+                .openai_api_key
+                .as_deref()
+                .map(str::trim)
+                .filter(|value| !value.is_empty())
+                .is_some(),
+        )
+        .bind(
+            request
+                .openai_api_key
+                .as_deref()
+                .map(str::trim)
+                .filter(|value| !value.is_empty()),
+        )
+        .bind(&now)
+        .fetch_one(&self.pool)
+        .await?;
+        Ok(Self::row_to_data_scientist_profile(row))
+    }
+
+    pub async fn get_data_scientist_openai_api_key(&self) -> Result<Option<String>, sqlx::Error> {
+        self.seed_data_scientist_profile().await?;
+        let row = sqlx::query(
+            r#"
+            SELECT openai_api_key_secret
+            FROM data_scientist_profile
+            WHERE id = 'default'
+            "#,
+        )
+        .fetch_one(&self.pool)
+        .await?;
+        Ok(row.get("openai_api_key_secret"))
+    }
+
+    pub async fn get_user_investor_profile(&self) -> Result<UserInvestorProfile, sqlx::Error> {
+        self.seed_user_investor_profile().await?;
+        let row = sqlx::query(
+            r#"
+            SELECT id, name, age, about, investment_goals, risk_tolerance, time_horizon,
+                   liquidity_needs, income_needs, investment_experience, restrictions,
+                   preferred_sectors, avoided_sectors, notes, created_at, updated_at
+            FROM user_investor_profile
+            WHERE id = 'default'
+            "#,
+        )
+        .fetch_one(&self.pool)
+        .await?;
+        Ok(Self::row_to_user_investor_profile(row))
+    }
+
+    pub async fn get_md_openai_api_key(&self) -> Result<Option<String>, sqlx::Error> {
+        self.seed_md_profile().await?;
+        let row = sqlx::query(
+            r#"
+            SELECT openai_api_key_secret
+            FROM md_profile
+            WHERE id = 'default'
+            "#,
+        )
+        .fetch_one(&self.pool)
+        .await?;
+        Ok(row.get("openai_api_key_secret"))
+    }
+
+    pub async fn update_user_investor_profile(
+        &self,
+        request: &UpdateUserInvestorProfileRequest,
+    ) -> Result<UserInvestorProfile, sqlx::Error> {
+        let now = Self::now_string();
+        let row = sqlx::query(
+            r#"
+            UPDATE user_investor_profile
+            SET name = $1,
+                age = $2,
+                about = $3,
+                investment_goals = $4,
+                risk_tolerance = $5,
+                time_horizon = $6,
+                liquidity_needs = $7,
+                income_needs = $8,
+                investment_experience = $9,
+                restrictions = $10,
+                preferred_sectors = $11,
+                avoided_sectors = $12,
+                notes = $13,
+                updated_at = $14
+            WHERE id = 'default'
+            RETURNING id, name, age, about, investment_goals, risk_tolerance, time_horizon,
+                      liquidity_needs, income_needs, investment_experience, restrictions,
+                      preferred_sectors, avoided_sectors, notes, created_at, updated_at
+            "#,
+        )
+        .bind(request.name.as_deref())
+        .bind(request.age.map(|age| age as i32))
+        .bind(request.about.as_deref())
+        .bind(request.investment_goals.as_deref())
+        .bind(request.risk_tolerance.as_deref())
+        .bind(request.time_horizon.as_deref())
+        .bind(request.liquidity_needs.as_deref())
+        .bind(request.income_needs.as_deref())
+        .bind(request.investment_experience.as_deref())
+        .bind(request.restrictions.as_deref())
+        .bind(request.preferred_sectors.as_deref())
+        .bind(request.avoided_sectors.as_deref())
+        .bind(request.notes.as_deref())
+        .bind(&now)
+        .fetch_one(&self.pool)
+        .await?;
+        Ok(Self::row_to_user_investor_profile(row))
+    }
+
+    pub async fn engine_channel_context(&self) -> Result<EngineChannelContext, sqlx::Error> {
+        let channels = self.list_channels().await?;
+        let mut recent_messages = Vec::new();
+        for channel in &channels {
+            recent_messages.extend(
+                self.list_channel_messages(&channel.id, Some(50), None, None)
+                    .await?,
+            );
+        }
+        let rows = sqlx::query(
+            r#"
+            SELECT id::text AS trader_id, persona, tone, communication_style
+            FROM traders
+            WHERE is_active = TRUE
+            ORDER BY name ASC
+            "#,
+        )
+        .fetch_all(&self.pool)
+        .await?;
+        Ok(EngineChannelContext {
+            channels,
+            recent_messages,
+            md_profile: self.get_md_profile().await?,
+            md_openai_api_key: self.get_md_openai_api_key().await?,
+            user_investor_profile: self.get_user_investor_profile().await?,
+            trader_personas: rows
+                .into_iter()
+                .map(|row| TraderPersona {
+                    trader_id: row.get("trader_id"),
+                    persona: row.get("persona"),
+                    tone: row.get("tone"),
+                    communication_style: row.get("communication_style"),
+                })
+                .collect(),
+        })
+    }
+
+    pub async fn list_recent_engine_events(
+        &self,
+        limit: i64,
+    ) -> Result<Vec<EngineEvent>, sqlx::Error> {
+        let rows = sqlx::query(
+            r#"
+            SELECT id, engine_name, event_type, symbol, message, timestamp, created_at
+            FROM engine_events
+            ORDER BY created_at DESC, id DESC
+            LIMIT $1
+            "#,
+        )
+        .bind(limit.clamp(1, 100))
+        .fetch_all(&self.pool)
+        .await?;
+
+        Ok(rows.into_iter().map(Self::row_to_engine_event).collect())
     }
 
     pub async fn create_data_source(
@@ -2748,6 +4432,88 @@ impl Database {
         .execute(&self.pool)
         .await?;
         Ok(result.rows_affected() > 0)
+    }
+
+    pub async fn get_data_source_script(
+        &self,
+        source_id: &str,
+    ) -> Result<Option<DataSourceScript>, sqlx::Error> {
+        let row = sqlx::query(
+            r#"
+            SELECT data_source_id::text AS data_source_id, language, script_text, script_hash,
+                   last_build_status, last_build_output, last_built_at::text AS last_built_at,
+                   created_at::text AS created_at, updated_at::text AS updated_at
+            FROM scrapper.data_source_scripts
+            WHERE data_source_id = $1::uuid
+            "#,
+        )
+        .bind(source_id)
+        .fetch_optional(&self.pool)
+        .await?;
+        Ok(row.map(Self::row_to_data_source_script))
+    }
+
+    pub async fn upsert_data_source_script(
+        &self,
+        source_id: &str,
+        script_text: &str,
+        script_hash: &str,
+    ) -> Result<DataSourceScript, sqlx::Error> {
+        let now = Self::now_string();
+        let row = sqlx::query(
+            r#"
+            INSERT INTO scrapper.data_source_scripts (
+                data_source_id, language, script_text, script_hash, last_build_status, created_at, updated_at
+            ) VALUES ($1::uuid, 'python', $2, $3, 'not_built', $4::timestamptz, $5::timestamptz)
+            ON CONFLICT (data_source_id) DO UPDATE
+            SET script_text = EXCLUDED.script_text,
+                script_hash = EXCLUDED.script_hash,
+                updated_at = EXCLUDED.updated_at
+            RETURNING data_source_id::text AS data_source_id, language, script_text, script_hash,
+                      last_build_status, last_build_output, last_built_at::text AS last_built_at,
+                      created_at::text AS created_at, updated_at::text AS updated_at
+            "#,
+        )
+        .bind(source_id)
+        .bind(script_text)
+        .bind(script_hash)
+        .bind(&now)
+        .bind(&now)
+        .fetch_one(&self.pool)
+        .await?;
+        Ok(Self::row_to_data_source_script(row))
+    }
+
+    pub async fn update_data_source_script_build(
+        &self,
+        source_id: &str,
+        status: &str,
+        output: &str,
+        script_hash: Option<&str>,
+    ) -> Result<Option<DataSourceScript>, sqlx::Error> {
+        let now = Self::now_string();
+        let row = sqlx::query(
+            r#"
+            UPDATE scrapper.data_source_scripts
+            SET last_build_status = $2,
+                last_build_output = $3,
+                last_built_at = $4::timestamptz,
+                script_hash = COALESCE($5, script_hash),
+                updated_at = $4::timestamptz
+            WHERE data_source_id = $1::uuid
+            RETURNING data_source_id::text AS data_source_id, language, script_text, script_hash,
+                      last_build_status, last_build_output, last_built_at::text AS last_built_at,
+                      created_at::text AS created_at, updated_at::text AS updated_at
+            "#,
+        )
+        .bind(source_id)
+        .bind(status)
+        .bind(output)
+        .bind(&now)
+        .bind(script_hash)
+        .fetch_optional(&self.pool)
+        .await?;
+        Ok(row.map(Self::row_to_data_source_script))
     }
 
     pub async fn list_data_source_items(

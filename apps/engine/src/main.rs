@@ -1,6 +1,8 @@
+mod channels;
 mod client;
 mod config;
 mod indicators;
+mod plan_monitor;
 mod risk;
 mod risk_guard;
 mod strategy_eval;

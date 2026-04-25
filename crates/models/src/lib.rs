@@ -1,3 +1,4 @@
+pub mod channels;
 pub mod chat_commands;
 pub mod data_sources;
 pub mod engine;

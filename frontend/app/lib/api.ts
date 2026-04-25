@@ -323,12 +323,116 @@ export interface Trader {
   freedom_level: TraderFreedomLevel;
   status: TraderStatus;
   default_paper_account_id?: string | null;
+  persona?: string | null;
+  tone?: string | null;
+  communication_style?: string | null;
   is_active: boolean;
   created_at: string;
   updated_at: string;
   started_at?: string | null;
   stopped_at?: string | null;
 }
+
+export interface Channel {
+  id: string;
+  name: string;
+  display_name: string;
+  description?: string | null;
+  is_system: boolean;
+  created_at: string;
+  updated_at: string;
+}
+
+export type ChannelAuthorType = "user" | "trader" | "md" | "system";
+
+export interface ChannelMessage {
+  id: string;
+  channel_id: string;
+  author_type: ChannelAuthorType;
+  author_id?: string | null;
+  author_name: string;
+  role: string;
+  content_markdown: string;
+  metadata_json?: string | null;
+  created_at: string;
+}
+
+export interface ChannelMessagesResponse {
+  messages: ChannelMessage[];
+}
+
+export interface TraderPersona {
+  trader_id: string;
+  persona?: string | null;
+  tone?: string | null;
+  communication_style?: string | null;
+}
+
+export interface TraderPersonaUpdateRequest {
+  persona?: string | null;
+  tone?: string | null;
+  communication_style?: string | null;
+}
+
+export interface MdProfile {
+  id: string;
+  name: string;
+  persona: string;
+  tone: string;
+  communication_style: string;
+  created_at: string;
+  updated_at: string;
+}
+
+export interface UpdateMdProfileRequest {
+  name?: string | null;
+  persona?: string | null;
+  tone?: string | null;
+  communication_style?: string | null;
+  openai_api_key?: string | null;
+}
+
+export interface DataScientistProfile {
+  id: string;
+  name: string;
+  persona: string;
+  tone: string;
+  communication_style: string;
+  created_at: string;
+  updated_at: string;
+}
+
+export interface UpdateDataScientistProfileRequest {
+  name?: string | null;
+  persona?: string | null;
+  tone?: string | null;
+  communication_style?: string | null;
+  openai_api_key?: string | null;
+}
+
+export interface UserInvestorProfile {
+  id: string;
+  name?: string | null;
+  age?: number | null;
+  about?: string | null;
+  investment_goals?: string | null;
+  risk_tolerance?: string | null;
+  time_horizon?: string | null;
+  liquidity_needs?: string | null;
+  income_needs?: string | null;
+  investment_experience?: string | null;
+  restrictions?: string | null;
+  preferred_sectors?: string | null;
+  avoided_sectors?: string | null;
+  notes?: string | null;
+  created_at: string;
+  updated_at: string;
+}
+
+export type UpdateUserInvestorProfileRequest = Omit<
+  UserInvestorProfile,
+  "id" | "created_at" | "updated_at"
+>;
 
 export interface TraderInfoSource {
   id: string;
@@ -403,11 +507,135 @@ export interface TraderTradeProposal {
   updated_at: string;
 }
 
+export type TraderSymbolAssetType = "stock" | "etf" | "index" | "crypto" | "other";
+export type TraderSymbolStatus = "watching" | "candidate" | "active" | "rejected" | "archived";
+export type TraderSymbolSource = "manual" | "ai" | "import" | "engine";
+
+export interface TraderSymbol {
+  id: string;
+  trader_id: string;
+  symbol: string;
+  asset_type: TraderSymbolAssetType;
+  name?: string | null;
+  exchange?: string | null;
+  sector?: string | null;
+  industry?: string | null;
+  notes?: string | null;
+  thesis?: string | null;
+  fit_score?: number | null;
+  status: TraderSymbolStatus;
+  source: TraderSymbolSource;
+  created_at: string;
+  updated_at: string;
+}
+
+export interface CreateTraderSymbolRequest {
+  symbol: string;
+  asset_type?: TraderSymbolAssetType | null;
+  name?: string | null;
+  exchange?: string | null;
+  sector?: string | null;
+  industry?: string | null;
+  notes?: string | null;
+  thesis?: string | null;
+  fit_score?: number | null;
+  status?: TraderSymbolStatus | null;
+  source?: TraderSymbolSource | null;
+}
+
+export interface UpdateTraderSymbolRequest {
+  asset_type?: TraderSymbolAssetType | null;
+  name?: string | null;
+  exchange?: string | null;
+  sector?: string | null;
+  industry?: string | null;
+  notes?: string | null;
+  thesis?: string | null;
+  fit_score?: number | null;
+  status?: TraderSymbolStatus | null;
+}
+
+export interface TraderSymbolsResponse {
+  symbols: TraderSymbol[];
+}
+
+export interface SuggestTraderSymbolsRequest {
+  max_symbols?: number | null;
+  include_etfs?: boolean | null;
+  include_stocks?: boolean | null;
+  focus?: string | null;
+}
+
+export interface SuggestTraderSymbolsResponse {
+  suggestions: TraderSymbol[];
+}
+
+export interface TraderPortfolioProposal {
+  id: string;
+  trader_id: string;
+  paper_account_id?: string | null;
+  title: string;
+  summary: string;
+  thesis: string;
+  status: string;
+  plan_state: string;
+  confidence?: number | null;
+  proposed_actions_json: string;
+  source_snapshot_json?: string | null;
+  risk_snapshot_json?: string | null;
+  market_snapshot_json?: string | null;
+  market_basis_json?: string | null;
+  invalidation_conditions_json?: string | null;
+  change_thresholds_json?: string | null;
+  replacement_reason?: string | null;
+  created_at: string;
+  updated_at: string;
+  reviewed_at?: string | null;
+  review_note?: string | null;
+  accepted_at?: string | null;
+  active_until?: string | null;
+  expected_duration_seconds?: number | null;
+}
+
+export interface TraderPortfolioProposalAction {
+  id: string;
+  proposal_id: string;
+  trader_id: string;
+  symbol?: string | null;
+  action_type: string;
+  side?: string | null;
+  quantity?: number | null;
+  order_type?: string | null;
+  entry_price?: number | null;
+  exit_price?: number | null;
+  limit_price?: number | null;
+  stop_price?: number | null;
+  expected_duration_seconds?: number | null;
+  enact_by?: string | null;
+  market_price_at_creation?: number | null;
+  rationale: string;
+  confidence?: number | null;
+  risk_decision?: string | null;
+  status: string;
+  created_at: string;
+  updated_at: string;
+}
+
+export interface TraderPortfolioProposalDetail {
+  proposal: TraderPortfolioProposal;
+  actions: TraderPortfolioProposalAction[];
+}
+
+export interface TraderPortfolioProposalsResponse {
+  proposals: TraderPortfolioProposalDetail[];
+}
+
 export interface TraderDetail {
   trader: Trader;
   info_sources: TraderInfoSource[];
   runtime_state?: TraderRuntimeState | null;
   recent_events: TraderEvent[];
+  tracked_symbols: TraderSymbol[];
 }
 
 export interface TraderEventsResponse {
@@ -418,7 +646,12 @@ export interface TraderTradeProposalsResponse {
   proposals: TraderTradeProposal[];
 }
 
-export type DataSourceType = "rss" | "web_page" | "manual_note" | "placeholder_api";
+export type DataSourceType =
+  | "rss"
+  | "web_page"
+  | "manual_note"
+  | "placeholder_api"
+  | "python_script";
 
 export interface DataSource {
   id: string;
@@ -484,6 +717,25 @@ export interface DataSourceEventsResponse {
   events: DataSourceEvent[];
 }
 
+export interface DataSourceScript {
+  data_source_id: string;
+  language: string;
+  script_text: string;
+  script_hash?: string | null;
+  last_build_status?: string | null;
+  last_build_output?: string | null;
+  last_built_at?: string | null;
+  created_at: string;
+  updated_at: string;
+}
+
+export interface BuildDataSourceScriptResponse {
+  success: boolean;
+  status: string;
+  output: string;
+  script_hash?: string | null;
+}
+
 export interface TraderDataSourcesResponse {
   data_sources: DataSource[];
 }
@@ -500,6 +752,47 @@ export interface ChatCommandResponse {
   handled: boolean;
   requires_confirmation: boolean;
   confirmation_token?: string | null;
+}
+
+export interface TraderChatMessage {
+  role: "user" | "assistant";
+  content: string;
+}
+
+export interface TraderChatResponse {
+  reply: string;
+  trader_id: string;
+  trader_name: string;
+  referenced_events: string[];
+  referenced_proposals: string[];
+  referenced_orders: string[];
+}
+
+export interface AgentChatMessage {
+  role: "user" | "assistant";
+  content: string;
+}
+
+export interface MdChatResponse {
+  reply: string;
+  referenced_channels: string[];
+  referenced_traders: string[];
+  referenced_events: string[];
+}
+
+export interface DataScientistChatAction {
+  type: string;
+  entity_id?: string | null;
+  name?: string | null;
+  source_type?: string | null;
+  url?: string | null;
+  build_status?: string | null;
+  build_output?: string | null;
+}
+
+export interface DataScientistChatResponse {
+  reply: string;
+  actions: DataScientistChatAction[];
 }
 
 type RequestOptions = {
@@ -543,11 +836,11 @@ async function request<T>(path: string, options: RequestOptions = {}): Promise<T
   return (await response.text()) as T;
 }
 
-function buildQuery(params: Record<string, string | number | boolean | undefined>) {
+function buildQuery(params: Record<string, string | number | boolean | null | undefined>) {
   const searchParams = new URLSearchParams();
 
   for (const [key, value] of Object.entries(params)) {
-    if (value === undefined) {
+    if (value === undefined || value === null || value === "") {
       continue;
     }
 
@@ -888,6 +1181,111 @@ export const deskApi = {
     );
   },
 
+  listTraderSymbols(
+    traderId: string,
+    filters: {
+      status?: TraderSymbolStatus | "";
+      asset_type?: TraderSymbolAssetType | "";
+      source?: TraderSymbolSource | "";
+    } = {},
+  ) {
+    const query = buildQuery(filters);
+    return request<TraderSymbolsResponse>(
+      `/traders/${encodeURIComponent(traderId)}/symbols${query}`,
+    );
+  },
+
+  createTraderSymbol(traderId: string, input: CreateTraderSymbolRequest) {
+    return request<TraderSymbol>(`/traders/${encodeURIComponent(traderId)}/symbols`, {
+      method: "POST",
+      body: input,
+    });
+  },
+
+  updateTraderSymbol(
+    traderId: string,
+    symbolId: string,
+    input: UpdateTraderSymbolRequest,
+  ) {
+    return request<TraderSymbol>(
+      `/traders/${encodeURIComponent(traderId)}/symbols/${encodeURIComponent(symbolId)}`,
+      { method: "PUT", body: input },
+    );
+  },
+
+  archiveTraderSymbol(traderId: string, symbolId: string) {
+    return request<TraderSymbol>(
+      `/traders/${encodeURIComponent(traderId)}/symbols/${encodeURIComponent(symbolId)}/archive`,
+      { method: "POST" },
+    );
+  },
+
+  activateTraderSymbol(traderId: string, symbolId: string) {
+    return request<TraderSymbol>(
+      `/traders/${encodeURIComponent(traderId)}/symbols/${encodeURIComponent(symbolId)}/activate`,
+      { method: "POST" },
+    );
+  },
+
+  rejectTraderSymbol(traderId: string, symbolId: string) {
+    return request<TraderSymbol>(
+      `/traders/${encodeURIComponent(traderId)}/symbols/${encodeURIComponent(symbolId)}/reject`,
+      { method: "POST" },
+    );
+  },
+
+  bulkUpsertTraderSymbols(traderId: string, symbols: CreateTraderSymbolRequest[]) {
+    return request<TraderSymbolsResponse>(
+      `/traders/${encodeURIComponent(traderId)}/symbols/bulk`,
+      { method: "POST", body: { symbols } },
+    );
+  },
+
+  suggestTraderSymbols(traderId: string, input: SuggestTraderSymbolsRequest) {
+    return request<SuggestTraderSymbolsResponse>(
+      `/traders/${encodeURIComponent(traderId)}/symbols/suggest`,
+      { method: "POST", body: input },
+    );
+  },
+
+  listTraderProposals(traderId: string) {
+    return request<TraderPortfolioProposalsResponse>(
+      `/traders/${encodeURIComponent(traderId)}/proposals`,
+    );
+  },
+
+  getLatestTraderProposal(traderId: string) {
+    return request<TraderPortfolioProposalDetail>(
+      `/traders/${encodeURIComponent(traderId)}/proposals/latest`,
+    );
+  },
+
+  getActiveTraderProposal(traderId: string) {
+    return request<TraderPortfolioProposalDetail>(
+      `/traders/${encodeURIComponent(traderId)}/proposals/active`,
+    );
+  },
+
+  getTraderProposal(traderId: string, proposalId: string) {
+    return request<TraderPortfolioProposalDetail>(
+      `/traders/${encodeURIComponent(traderId)}/proposals/${encodeURIComponent(proposalId)}`,
+    );
+  },
+
+  acceptTraderProposal(traderId: string, proposalId: string, reviewNote?: string) {
+    return request<TraderPortfolioProposalDetail>(
+      `/traders/${encodeURIComponent(traderId)}/proposals/${encodeURIComponent(proposalId)}/accept`,
+      { method: "POST", body: { status: "accepted", review_note: reviewNote ?? null } },
+    );
+  },
+
+  rejectTraderProposal(traderId: string, proposalId: string, reviewNote?: string) {
+    return request<TraderPortfolioProposalDetail>(
+      `/traders/${encodeURIComponent(traderId)}/proposals/${encodeURIComponent(proposalId)}/reject`,
+      { method: "POST", body: { status: "rejected", review_note: reviewNote ?? null } },
+    );
+  },
+
   approveTraderTradeProposal(traderId: string, proposalId: string) {
     return request<TraderTradeProposal>(
       `/traders/${encodeURIComponent(traderId)}/trade-proposals/${encodeURIComponent(proposalId)}/approve`,
@@ -939,6 +1337,32 @@ export const deskApi = {
     );
   },
 
+  getDataSourceScript(sourceId: string) {
+    return request<DataSourceScript>(
+      `/data-sources/${encodeURIComponent(sourceId)}/script`,
+    );
+  },
+
+  updateDataSourceScript(sourceId: string, input: { script_text: string }) {
+    return request<DataSourceScript>(
+      `/data-sources/${encodeURIComponent(sourceId)}/script`,
+      {
+        method: "PUT",
+        body: input,
+      },
+    );
+  },
+
+  buildDataSourceScript(sourceId: string, input: { script_text?: string } = {}) {
+    return request<BuildDataSourceScriptResponse>(
+      `/data-sources/${encodeURIComponent(sourceId)}/script/build`,
+      {
+        method: "POST",
+        body: input,
+      },
+    );
+  },
+
   getTraderDataSources(traderId: string) {
     return request<TraderDataSourcesResponse>(
       `/traders/${encodeURIComponent(traderId)}/data-sources`,
@@ -960,6 +1384,107 @@ export const deskApi = {
   }) {
     return request<ChatCommandResponse>("/chat/commands", {
       method: "POST",
+      body: input,
+    });
+  },
+
+  sendTraderChatMessage(
+    traderId: string,
+    input: {
+      message: string;
+      conversation?: TraderChatMessage[];
+    },
+  ) {
+    return request<TraderChatResponse>(
+      `/traders/${encodeURIComponent(traderId)}/chat`,
+      {
+        method: "POST",
+        body: input,
+      },
+    );
+  },
+
+  listChannels() {
+    return request<Channel[]>("/channels");
+  },
+
+  listChannelMessages(
+    channelId: string,
+    params: { limit?: number; before?: string; after?: string } = {},
+  ) {
+    return request<ChannelMessagesResponse>(
+      `/channels/${encodeURIComponent(channelId)}/messages${buildQuery(params)}`,
+    );
+  },
+
+  postChannelMessage(channelId: string, contentMarkdown: string) {
+    return request<ChannelMessage>(
+      `/channels/${encodeURIComponent(channelId)}/messages`,
+      { method: "POST", body: { content_markdown: contentMarkdown } },
+    );
+  },
+
+  clearChannelMessages() {
+    return request<void>("/channels/messages", { method: "DELETE" });
+  },
+
+  getTraderPersona(traderId: string) {
+    return request<TraderPersona>(`/traders/${encodeURIComponent(traderId)}/persona`);
+  },
+
+  updateTraderPersona(traderId: string, input: TraderPersonaUpdateRequest) {
+    return request<TraderPersona>(`/traders/${encodeURIComponent(traderId)}/persona`, {
+      method: "PUT",
+      body: input,
+    });
+  },
+
+  getMdProfile() {
+    return request<MdProfile>("/md-profile");
+  },
+
+  updateMdProfile(input: UpdateMdProfileRequest) {
+    return request<MdProfile>("/md-profile", { method: "PUT", body: input });
+  },
+
+  sendMdChatMessage(input: {
+    message: string;
+    conversation?: AgentChatMessage[];
+  }) {
+    return request<MdChatResponse>("/md-profile/chat", {
+      method: "POST",
+      body: input,
+    });
+  },
+
+  getDataScientistProfile() {
+    return request<DataScientistProfile>("/data-scientist-profile");
+  },
+
+  updateDataScientistProfile(input: UpdateDataScientistProfileRequest) {
+    return request<DataScientistProfile>("/data-scientist-profile", {
+      method: "PUT",
+      body: input,
+    });
+  },
+
+  sendDataScientistChatMessage(input: {
+    message: string;
+    conversation?: AgentChatMessage[];
+  }) {
+    return request<DataScientistChatResponse>("/data-scientist-profile/chat", {
+      method: "POST",
+      body: input,
+    });
+  },
+
+  getInvestorProfile() {
+    return request<UserInvestorProfile>("/settings/investor-profile");
+  },
+
+  updateInvestorProfile(input: UpdateUserInvestorProfileRequest) {
+    return request<UserInvestorProfile>("/settings/investor-profile", {
+      method: "PUT",
       body: input,
     });
   },

@@ -7,6 +7,7 @@ use tokio::time;
 use tracing::{error, info, warn};
 
 use crate::{
+    channels,
     client::OpenApiClient,
     config::EngineConfig,
     strategy_runner::run_strategy,
@@ -33,6 +34,7 @@ pub async fn run_engine(config: EngineConfig) -> Result<()> {
         engine_name = %config.engine_name,
         openapi_base_url = %config.openapi_base_url,
         poll_interval_seconds = config.poll_interval_seconds,
+        trader_proposal_interval_seconds = config.trader_proposal_interval_seconds,
         enable_test_paper_orders = config.enable_test_paper_orders,
         "engine startup"
     );
@@ -213,7 +215,7 @@ async fn run_iteration(
         }
     }
 
-    if let Err(err) = run_traders(config, trader_client).await {
+    if let Err(err) = run_traders(config, trader_client, cache.clone()).await {
         warn!(error = %err, "failed to run traders");
         report_event(
             client,
@@ -223,6 +225,9 @@ async fn run_iteration(
             format!("failed to run traders: {err}"),
         )
         .await;
+    }
+    if let Err(err) = channels::maybe_post_md_message(config, trader_client).await {
+        warn!(error = %err, "failed to run MD channel monitor");
     }
 
     Ok(())

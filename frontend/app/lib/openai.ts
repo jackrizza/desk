@@ -7,7 +7,8 @@ export function getStoredOpenAIApiKey() {
     return "";
   }
 
-  return window.localStorage.getItem(OPENAI_API_KEY_STORAGE_KEY) ?? "";
+  window.localStorage.removeItem(OPENAI_API_KEY_STORAGE_KEY);
+  return window.sessionStorage.getItem(OPENAI_API_KEY_STORAGE_KEY) ?? "";
 }
 
 export function saveOpenAIApiKey(apiKey: string) {
@@ -16,10 +17,11 @@ export function saveOpenAIApiKey(apiKey: string) {
   }
 
   const trimmed = apiKey.trim();
+  window.localStorage.removeItem(OPENAI_API_KEY_STORAGE_KEY);
   if (trimmed) {
-    window.localStorage.setItem(OPENAI_API_KEY_STORAGE_KEY, trimmed);
+    window.sessionStorage.setItem(OPENAI_API_KEY_STORAGE_KEY, trimmed);
   } else {
-    window.localStorage.removeItem(OPENAI_API_KEY_STORAGE_KEY);
+    window.sessionStorage.removeItem(OPENAI_API_KEY_STORAGE_KEY);
   }
 
   window.dispatchEvent(

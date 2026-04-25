@@ -1,20 +1,24 @@
 use anyhow::{Context, Result};
-use models::data_sources::DataSource;
+use models::data_sources::{DataSource, DataSourceScript};
 use reqwest::Client;
 use sha2::{Digest, Sha256};
 use std::time::Duration;
 
-use crate::types::ScrappedItem;
+use crate::{python_runtime::PythonRuntime, types::ScrappedItem};
 
 #[derive(Clone)]
 pub struct SourcePoller {
     http: Client,
+    openapi_base_url: String,
+    python_runtime: PythonRuntime,
 }
 
 impl SourcePoller {
-    pub fn new() -> Result<Self> {
+    pub fn new(openapi_base_url: String, python_runtime: PythonRuntime) -> Result<Self> {
         Ok(Self {
             http: Client::builder().timeout(Duration::from_secs(15)).build()?,
+            openapi_base_url: openapi_base_url.trim_end_matches('/').to_string(),
+            python_runtime,
         })
     }
 
@@ -22,9 +26,37 @@ impl SourcePoller {
         match source.source_type.as_str() {
             "rss" => self.poll_rss(source).await,
             "web_page" => self.poll_web_page(source).await,
+            "python_script" => self.poll_python_script(source).await,
             "manual_note" | "placeholder_api" => Ok(Vec::new()),
             other => anyhow::bail!("unsupported source type {other}"),
         }
+    }
+
+    async fn poll_python_script(&self, source: &DataSource) -> Result<Vec<ScrappedItem>> {
+        let script = self.fetch_script(source).await?;
+        self.python_runtime.collect(source, &script).await
+    }
+
+    async fn fetch_script(&self, source: &DataSource) -> Result<DataSourceScript> {
+        let url = format!(
+            "{}/engine/data-sources/{}/script",
+            self.openapi_base_url, source.id
+        );
+        self.http
+            .get(&url)
+            .send()
+            .await
+            .with_context(|| format!("failed to fetch python script from {url}"))?
+            .error_for_status()
+            .with_context(|| {
+                format!(
+                    "openapi returned error while loading script for {}",
+                    source.id
+                )
+            })?
+            .json::<DataSourceScript>()
+            .await
+            .context("failed to decode python script response")
     }
 
     async fn fetch_body(&self, source: &DataSource) -> Result<String> {

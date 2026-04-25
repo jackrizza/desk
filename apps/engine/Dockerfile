@@ -1,7 +1,7 @@
 FROM rust:1.88-slim-bookworm AS chef
 
 RUN apt-get update \
-    && apt-get install -y --no-install-recommends protobuf-compiler pkg-config libssl-dev \
+    && apt-get install -y --no-install-recommends protobuf-compiler pkg-config libssl-dev python3 python3-dev python3-venv \
     && rm -rf /var/lib/apt/lists/*
 
 RUN cargo install cargo-chef --locked

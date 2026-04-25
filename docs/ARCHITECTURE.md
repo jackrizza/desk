@@ -126,16 +126,18 @@ The frontend uses `frontend/app/lib/api.ts` as its shared API client.
 The chat layer:
 
 - keeps per-page chat history
-- can call OpenAI through the browser when a key is present
+- can call OpenAI through the browser for Desk fallback only when a session key is present
 - uses page-aware instructions for market, portfolio, and project contexts
 - sends management commands to `openapi` before falling back to normal chat behavior
+- routes MD and Data Scientist chat to backend endpoints using backend OpenAI configuration
 
 ## Persistence Model
 
 Current persistence is split like this:
 
 - PostgreSQL: projects, portfolios, positions, project strategy, strategy runtime state, strategy signals, strategy trading config, strategy risk config, paper trading state
-- browser local storage: chat history, theme state, chat rail state, OpenAI API key
+- browser local storage: chat history, theme state, chat rail state
+- browser session storage: optional local Desk-chat OpenAI key for the current browser session only
 - local cache directory: market data cache
 
 ## Service Boundary
@@ -157,6 +159,24 @@ if the backend marks the message as handled, the chat renders the backend reply 
 relevant Trader/Data Source state. If the backend does not recognize a command, the existing normal
 chat path continues.
 
+The right-side chat can target Desk, MD, Data Scientist, or a specific Trader. Desk chat keeps the
+existing app-level command path. Trader chat calls `POST /api/traders/:trader_id/chat` and is explanatory:
+the backend assembles the Trader's saved perspective, freedom level, assigned data sources, recent
+items, recent events, runtime state, proposals, and linked paper orders/fills, then asks the model
+to answer as that Trader. Trader chat never receives or returns raw API keys in the browser and
+cannot execute trades directly.
+
+MD chat calls `POST /api/md-profile/chat`. It is a monitoring role that reads MD profile,
+investor profile, recent channel context, running Traders, Trader events/proposals, data source
+errors, and engine events. It can explain concerns, summarize disagreement, identify drift, and ask
+clarifying questions. It cannot place trades, approve trades, or submit paper orders.
+
+Data Scientist chat calls `POST /api/data-scientist-profile/chat`. It is a data-source role that
+can reason about extraction strategies and, when a URL is supplied, create a `python_script` data
+source through OpenAPI data-source functions, save the generated script, run the existing build
+validator, and return a creation card. Optional OpenAI web search is controlled by backend
+configuration. If unavailable, the backend falls back to a generic standard-library collector.
+
 V1 command parsing uses deterministic backend patterns first, then an optional backend OpenAI parser
 when `CHAT_COMMAND_OPENAI_API_KEY` or `OPENAI_API_KEY` is configured. It is scoped to supported
 management phrases for:
@@ -171,6 +191,10 @@ Sources, promoting a Trader to `senior_trader`, and starting a senior Trader req
 Trader API keys are not requested in general chat. Chat-created Traders use a backend default key
 from `CHAT_DEFAULT_OPENAI_API_KEY` or `OPENAI_API_KEY` when present; otherwise the user is told to
 add the key through the write-only Trader form. Saved keys are never returned through chat responses.
+
+Chat history is separated by target: Desk histories remain page-oriented, MD and Data Scientist have
+their own histories, and Trader chat histories use `trader:<trader_id>` storage keys. If a selected
+Trader disappears, the frontend falls back to Desk.
 # Trader Architecture
 
 Trader is an engine-resident autonomous paper-trading feature. The browser creates and manages Trader records, then the engine continues polling `/engine/config/traders` and evaluating running Traders even after the web app closes.
@@ -186,6 +210,20 @@ Junior review flow: the engine creates `trader_trade_proposals`; the UI approve 
 
 Senior execution is paper-only. Trader-specific risk configuration is a future extension; v1 keeps conservative behavior and relies on selected paper account checks such as cash and position validation.
 
+Trader symbol universes are stored in `trader_symbols`. They describe the securities a Trader is designed to watch, with metadata such as asset type, thesis, fit score, status, and source. The UI supports manual additions, AI-suggested candidates, activation, rejection, and archiving.
+
+The engine receives `tracked_symbols` in `/engine/config/traders` and only evaluates symbols whose status is `active` or `watching`. If a running Trader has no evaluable tracked symbols, the engine records a `no_tracked_symbols` event and does not trade. Symbol tracking is candidate selection context only; it does not bypass freedom levels, review flow, paper trading, or risk controls.
+
+Trader chat includes the symbol universe in its server-side prompt context so a Trader can explain what it is watching and why. Direct Trader chat remains explanatory and does not mutate the watchlist or place orders in v1.
+
+Trader portfolio proposals are generated by the engine for running Traders on `TRADER_PROPOSAL_INTERVAL_SECONDS` (default 300 seconds). A proposal summarizes the Trader's desired posture and proposed actions using its perspective, tracked symbols, source context, paper account selection, and conservative risk metadata. Creating a new proposal marks older `proposed` proposals as `superseded`.
+
+Portfolio proposals are review artifacts, not execution instructions. Analyst and junior Traders only create proposals/events. Senior Traders still execute paper orders only through the existing engine workflow and risk checks; accepting a portfolio proposal does not submit orders.
+
+Accepted proposals become active plans. The engine checks the active plan on each proposal interval and emits `active_plan_held` when no material change is found. Replacement proposals are generated only after deterministic plan monitoring detects material change, such as active duration expiry or tracked-symbol mismatch. Future extensions can add richer price, data-source, risk-config, and paper-position checks in `apps/engine/src/plan_monitor.rs`.
+
+Active plans carry market basis, invalidation conditions, change thresholds, expected duration, and action-level entry/exit/limit/stop prices. A proposed replacement starts as `proposed`; the existing active plan remains the plan of record until the replacement is accepted or the active plan is invalidated.
+
 # Scrapper
 
 `scrapper` is a Dockerized Rust background service for trader information gathering. It runs independently from the browser, polls enabled data sources every 30 seconds by default, and stores discovered items in a dedicated `scrapper` Postgres schema.
@@ -197,5 +235,44 @@ V1 source types:
 - `web_page`: fetches a page and stores a new item when the body hash changes.
 - `manual_note`: saved configuration/content only; no external polling.
 - `placeholder_api`: saved config only for future external APIs.
+- `python_script`: script-backed collector stored through OpenAPI and executed by `scrapper`.
+
+Python Script sources add a right-side Monaco editor in the Data Sources UI. The source must exist
+before editing; after creation the frontend loads `/data-sources/:source_id/script`, autosaves
+debounced edits through OpenAPI, and calls `/data-sources/:source_id/script/build` for syntax and
+`collect(context)` validation. The frontend never calls `scrapper` directly.
+
+During polling, `scrapper` fetches script content from
+`/engine/data-sources/:source_id/script`, creates/reuses one shared Python virtual environment
+(`SCRAPPER_PYTHON_VENV_PATH`, default `/app/.venv`), and executes `collect(context)` with PyO3.
+The current v1 venv support creates and logs the environment path; package installation and
+dependency management are intentionally not exposed yet.
+
+Collector scripts receive a plain context dictionary with data source metadata and must return a
+dict containing an `items` list. Each item requires `title`; `external_id`, `url`, `content`,
+`summary`, and `published_at` are optional. Missing `external_id` values are hashed from item
+content. Results are capped by `SCRAPPER_PYTHON_MAX_ITEMS` (default 100), large text fields are
+truncated, Python exceptions are captured into `last_error`, and the worker records
+`python_script_polled` or `python_script_failed` events. Scripts are collectors only; no trading
+helpers or secrets are provided to script context.
 
 Trader engine config includes assigned data source metadata so trader prompts can include source context. Recent item consumption can be expanded through OpenAPI without requiring the web app to remain open.
+## Channels
+
+Channels add a persisted coordination layer between the user, AI traders, and the MD. The database owns `channels`, `channel_messages`, trader persona fields, `md_profile`, and `user_investor_profile`. OpenAPI is the only REST surface for this feature; the engine posts through OpenAPI and never writes channel data directly.
+
+The engine adds a communication decision after trader evaluation. It can post to `#data_analysis` for source/data uncertainty, `#trading` for proposal, risk, portfolio, or trade-plan topics, and `#general` for broad coordination. Channel discussion is advisory context only: no channel message can submit paper orders, approve proposals, or bypass risk guards.
+
+The MD is an engine-side and chat-side monitoring role. It reads recent channel context, asks clarifying questions, challenges weak assumptions, summarizes disagreement, and reminds traders of risk and user-profile context. It does not place trades.
+
+## Data Scientist
+
+The Data Scientist profile is persisted in `data_scientist_profile`. Its chat endpoint is hosted by
+OpenAPI so the browser never calls `scrapper` directly and never supplies backend agent API keys.
+URL-to-Python-source creation is an OpenAPI orchestration over existing data source CRUD, script save,
+and script build functions.
+
+Generated collector scripts are safety-limited: `collect(context)`, no secrets, no environment
+access, no shell commands, no file writes, no trading endpoints, at most 100 items, and graceful
+network failure handling. Build validation checks syntax and the `collect(context)` contract; it does
+not guarantee extraction quality, so users should inspect generated scripts in the Data Sources UI.

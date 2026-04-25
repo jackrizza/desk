@@ -1832,6 +1832,9 @@ export function Homepage() {
         messages={chat.messages}
         pending={chat.pending}
         suggestions={chat.suggestions}
+        chatTarget={chat.chatTarget}
+        chatTraders={chat.chatTraders}
+        onChatTargetChange={chat.setChatTarget}
         onClose={() => setChatOpen(false)}
         onSubmit={chat.sendMessage}
         onClear={chat.clearMessages}

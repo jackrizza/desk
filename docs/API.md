@@ -328,14 +328,54 @@ Public UI endpoints:
 - `GET /traders/:trader_id/events`, `/runtime-state`, `/trade-proposals`
 - `POST /traders/:trader_id/trade-proposals/:proposal_id/approve`
 - `POST /traders/:trader_id/trade-proposals/:proposal_id/reject`
+- `GET /traders/:trader_id/proposals`
+- `GET /traders/:trader_id/proposals/latest`
+- `GET /traders/:trader_id/proposals/active`
+- `GET /traders/:trader_id/proposals/:proposal_id`
+- `POST /traders/:trader_id/proposals/:proposal_id/review`
+- `POST /traders/:trader_id/proposals/:proposal_id/accept`
+- `POST /traders/:trader_id/proposals/:proposal_id/reject`
+- `GET /traders/:trader_id/symbols`
+- `POST /traders/:trader_id/symbols`
+- `PUT /traders/:trader_id/symbols/:symbol_id`
+- `DELETE /traders/:trader_id/symbols/:symbol_id`
+- `POST /traders/:trader_id/symbols/bulk`
+- `POST /traders/:trader_id/symbols/suggest`
+- `POST /traders/:trader_id/symbols/:symbol_id/archive`
+- `POST /traders/:trader_id/symbols/:symbol_id/activate`
+- `POST /traders/:trader_id/symbols/:symbol_id/reject`
 
 Internal engine endpoints:
 - `GET /engine/config/traders`
 - `POST /engine/traders/:trader_id/runtime-state`
 - `POST /engine/traders/:trader_id/events`
 - `POST /engine/traders/:trader_id/trade-proposals`
+- `POST /engine/traders/:trader_id/proposals`
 
 `GET /engine/config/traders` returns active running traders and currently includes the stored OpenAI key for local engine execution. This is for v1 local Docker engine/openapi communication only and must be protected before public deployment.
+
+## Trader Symbol Universe
+
+Each Trader can maintain a persisted symbol universe/watchlist in `trader_symbols`. Symbols are normalized to uppercase and constrained by:
+- `asset_type`: `stock`, `etf`, `index`, `crypto`, `other`
+- `status`: `watching`, `candidate`, `active`, `rejected`, `archived`
+- `source`: `manual`, `ai`, `import`, `engine`
+
+`GET /traders/:trader_id/symbols` supports optional `status`, `asset_type`, and `source` query filters. Delete/archive keeps history by setting `status = archived`.
+
+`POST /traders/:trader_id/symbols/suggest` asks OpenAI for up to 50 liquid stocks/ETFs that fit the Trader's perspective, assigned data sources, existing symbols, and optional focus. Suggestions are persisted as `source = ai` and `status = candidate`.
+
+Engine trader config includes `tracked_symbols`; the engine evaluates only `active` and `watching` symbols. `rejected` and `archived` symbols are not evaluated. This feature does not directly execute trades.
+
+## Trader Portfolio Proposals
+
+Running Traders periodically create durable portfolio proposals in `trader_portfolio_proposals` with child rows in `trader_portfolio_proposal_actions`. The engine posts proposals through `POST /engine/traders/:trader_id/proposals`; new proposals supersede previous `proposed` proposals for that Trader.
+
+Proposal statuses are `proposed`, `accepted`, `rejected`, `superseded`, `executed`, and `expired`. Accepted proposals become active plans with `plan_state = active`, `accepted_at`, optional `active_until`, expected duration, market basis, invalidation conditions, change thresholds, and replacement reason metadata. `GET /traders/:trader_id/proposals/active` returns the current accepted active plan.
+
+Proposal actions use action types `buy`, `sell`, `hold`, `watch`, `activate_symbol`, `reject_symbol`, `reduce`, `increase`, and `no_action`. Actions can include entry, exit, limit, stop, enact-by, expected duration, and market price at creation fields. Risk decisions are attached as explanatory metadata. The engine proposal flow never submits orders.
+
+Once a plan is active, the engine holds it until deterministic monitoring detects a material change such as plan expiry or symbol universe mismatch. Replacement proposals are created as `proposed`; the active plan remains active until the user accepts the replacement or the engine marks it invalidated/expired.
 
 # Data Source API
 
@@ -350,7 +390,35 @@ The frontend manages source configuration through OpenAPI only:
 - `GET /traders/:trader_id/data-sources`
 - `PUT /traders/:trader_id/data-sources`
 
-Supported v1 source types are `rss`, `web_page`, `manual_note`, and `placeholder_api`. RSS and web page sources require an `http://` or `https://` URL. Deletes are soft deletes that disable the source and preserve items/events.
+Supported v1 source types are `rss`, `web_page`, `manual_note`, `placeholder_api`, and `python_script`. RSS and web page sources require an `http://` or `https://` URL. Deletes are soft deletes that disable the source and preserve items/events.
+
+Python script source endpoints:
+- `GET /data-sources/:source_id/script`: returns the saved script, creating a starter script if needed.
+- `PUT /data-sources/:source_id/script`: saves script text and updates its hash without executing it.
+- `POST /data-sources/:source_id/script/build`: validates Python syntax and `collect(context)`, then persists build status/output.
+- `GET /engine/data-sources/:source_id/script`: internal scrapper endpoint for enabled Python Script sources.
+
+Script builds return:
+- `success`
+- `status` as `success` or `failed`
+- `output`
+- `script_hash`
+
+Example collector:
+
+```python
+def collect(context):
+    return {
+        "items": [
+            {
+                "external_id": "hello-world",
+                "title": "Hello from Python",
+                "content": "This item was generated by a Python script.",
+                "summary": "Python script test item.",
+            }
+        ]
+    }
+```
 
 # Chat Commands
 
@@ -366,3 +434,109 @@ Responses include `handled`, `reply`, `actions`, and optional confirmation field
 Supported v1 actions include creating/updating/listing/starting/stopping/pausing/deleting Traders, creating/updating/listing/disabling Data Sources, showing status/items, and assigning/unassigning Data Sources to Traders. Chat commands never expose saved API keys.
 
 Parsing first uses deterministic backend command patterns. If `CHAT_COMMAND_OPENAI_API_KEY` or `OPENAI_API_KEY` is configured, unrecognized messages can be parsed by OpenAI using `CHAT_COMMAND_MODEL` or the default `gpt-5.2`.
+
+## Trader Chat
+
+`POST /traders/:trader_id/chat` sends an explanatory conversation message to one Trader.
+
+Request:
+- `message`: user text.
+- `conversation`: optional recent chat messages with `role` and `content`.
+
+Response:
+- `reply`
+- `trader_id`
+- `trader_name`
+- `referenced_events`
+- `referenced_proposals`
+- `referenced_orders`
+
+Trader chat loads server-side context: Trader perspective, freedom level, status, tracked symbols,
+latest portfolio proposal, assigned data sources and recent items, recent events, trade proposals,
+runtime state, and linked paper orders/fills.
+The endpoint uses the Trader's saved OpenAI key when available, then backend defaults. It never
+returns API keys.
+
+Trader chat is conversational only in v1. It cannot place, approve, submit, or execute trades.
+Paper execution remains limited to the engine/review/risk-controlled workflows.
+
+## Chat Targets
+
+The right-side chat can target:
+
+- `Desk`: the main app assistant. Desk keeps app chat commands through `POST /chat/commands`.
+- `MD`: managing director AI. It monitors traders, drift, disagreement, risk context, and missing information.
+- `Data Scientist`: data-source AI. It creates and improves data sources, including URL-to-`python_script` sources.
+- `Trader: <name>`: an individual Trader using the existing Trader chat endpoint.
+
+If a selected Trader no longer exists, the frontend falls back to Desk. MD and Data Scientist chat
+are advisory and cannot place, approve, submit, or execute trades.
+
+## MD Chat
+
+`POST /md-profile/chat`
+
+Request:
+
+- `message`
+- `conversation`: optional `{ role, content }` chat history
+
+Response:
+
+- `reply`
+- `referenced_channels`
+- `referenced_traders`
+- `referenced_events`
+
+The backend prompt includes the MD profile, investor profile, recent channel messages, running
+Traders, recent Trader events/proposals, recent data source errors, and recent engine events when
+available. The endpoint uses backend OpenAI configuration only (`CHAT_DEFAULT_OPENAI_API_KEY` or
+`OPENAI_API_KEY`) and never exposes keys to the frontend.
+
+## Data Scientist Chat
+
+Profile endpoints:
+
+- `GET /data-scientist-profile`
+- `PUT /data-scientist-profile`
+- `POST /data-scientist-profile/chat`
+
+`POST /data-scientist-profile/chat` accepts `message` and optional `conversation`. Responses include
+`reply` and `actions`. A created source action has `type = "data_source_created"` plus the source id,
+name, URL, source type, build status, and build output.
+
+When the message contains a URL, the Data Scientist:
+
+1. Plans a collector script with backend OpenAI when configured, optionally using OpenAI web search
+   when `DATA_SCIENTIST_OPENAI_WEB_SEARCH=true`.
+2. Falls back to a generic standard-library HTML link collector when model/web search support is
+   unavailable.
+3. Creates a `python_script` data source through OpenAPI data-source functions.
+4. Saves the generated script through the existing script endpoint logic.
+5. Calls the existing build validator and reports success or failure.
+6. Attempts one model-based repair after a build failure when OpenAI is available.
+
+Generated scripts must define `collect(context)`, use the source URL from `context`, return at most
+100 items, avoid secrets, file writes, shell commands, environment variables, and trading endpoints.
+The frontend never talks directly to `scrapper`; Python data sources remain created, edited, and
+built through OpenAPI.
+
+OpenAI web search is optional. If unavailable, generated scripts are generic and may need inspection
+in the Data Sources editor before relying on extraction quality.
+## Channels
+
+Channels are persisted shared rooms for user, trader, MD, and system discussion. Initial system channels are `#general`, `#data_analysis`, and `#trading`. Channel messages are coordination context only; they do not execute trades and do not bypass existing proposal, paper trading, or risk-control workflows.
+
+Endpoints:
+
+- `GET /channels` lists channels in default order.
+- `GET /channels/:channel_id/messages?limit=&before=&after=` returns persisted messages ascending by `created_at`.
+- `POST /channels/:channel_id/messages` posts a user markdown message.
+- `POST /engine/channels/:channel_name/messages` lets the engine persist trader, MD, or system markdown messages.
+- `GET /engine/channel-context` returns channels, recent messages, MD profile, investor profile, and trader personas for engine prompting.
+- `GET|PUT /traders/:trader_id/persona` reads or updates trader persona, tone, and communication style.
+- `GET|PUT /md-profile` reads or updates the MD profile.
+- `GET|PUT /data-scientist-profile` reads or updates the Data Scientist profile.
+- `GET|PUT /settings/investor-profile` reads or updates investor profile context.
+
+Engine channel posting is rate-limited by persisted recent messages: traders default to a five-minute cooldown per channel and the MD defaults to three minutes. Engine environment flags are `ENGINE_CHANNELS_ENABLED`, `ENGINE_MD_ENABLED`, and `ENGINE_CHANNEL_CHECK_INTERVAL_SECONDS`.

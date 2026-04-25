@@ -11,6 +11,7 @@
   "dependencies": {
     "@emotion/react": "^11.14.0",
     "@emotion/styled": "^11.14.1",
+    "@monaco-editor/react": "^4.7.0",
     "@mui/material": "^7.3.10",
     "@mui/x-charts-premium": "^9.0.2",
     "@react-router/node": "7.14.0",
@@ -19,7 +20,9 @@
     "isbot": "^5.1.36",
     "react": "^19.2.4",
     "react-dom": "^19.2.4",
-    "react-router": "7.14.0"
+    "react-markdown": "^10.1.0",
+    "react-router": "7.14.0",
+    "remark-gfm": "^4.0.1"
   },
   "devDependencies": {
     "@react-router/dev": "7.14.0",

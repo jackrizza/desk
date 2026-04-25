@@ -1,8 +1,14 @@
 use models::engine::{ActiveSymbolsResponse, EngineHealthResponse};
 use models::{
+    channels::{
+        Channel, ChannelMessage, ChannelMessagesResponse, DataScientistChatResponse,
+        DataScientistProfile, EngineChannelContext, MdChatResponse, MdProfile, TraderPersona,
+        UserInvestorProfile,
+    },
     chat_commands::ChatCommandResponse,
     data_sources::{
-        DataSource, DataSourceEventsResponse, DataSourceItemsResponse, TraderDataSourcesResponse,
+        BuildDataSourceScriptResponse, DataSource, DataSourceEventsResponse,
+        DataSourceItemsResponse, DataSourceScript, TraderDataSourcesResponse,
     },
     paper::{
         PaperAccount, PaperAccountEvent, PaperAccountSummaryResponse, PaperFill, PaperOrder,
@@ -11,8 +17,10 @@ use models::{
     portfolio::{Portfolio, Position},
     projects::Project,
     trader::{
-        EngineTraderConfigResponse, Trader, TraderDetail, TraderEvent, TraderEventsResponse,
-        TraderRuntimeState, TraderTradeProposal, TraderTradeProposalsResponse,
+        EngineTraderConfigResponse, SuggestTraderSymbolsResponse, Trader, TraderChatResponse,
+        TraderDetail, TraderEvent, TraderEventsResponse, TraderPortfolioProposalDetail,
+        TraderPortfolioProposalsResponse, TraderRuntimeState, TraderSymbol, TraderSymbolsResponse,
+        TraderTradeProposal, TraderTradeProposalsResponse,
     },
     trading::{
         EngineStrategyConfigResponse, StrategyRiskConfig, StrategyRuntimeState,
@@ -32,6 +40,8 @@ pub enum ApiTags {
     Position,
     Strategy,
     Trader,
+    Channel,
+    Settings,
 }
 
 #[derive(ApiResponse)]
@@ -105,6 +115,42 @@ pub enum GetDataSourceEventsResponse {
 }
 
 #[derive(ApiResponse)]
+pub enum GetDataSourceScriptResponse {
+    #[oai(status = 200)]
+    Ok(Json<DataSourceScript>),
+    #[oai(status = 400)]
+    BadRequest(Json<ErrorBody>),
+    #[oai(status = 404)]
+    NotFound(Json<ErrorBody>),
+    #[oai(status = 500)]
+    InternalError(Json<ErrorBody>),
+}
+
+#[derive(ApiResponse)]
+pub enum UpdateDataSourceScriptResponse {
+    #[oai(status = 200)]
+    Ok(Json<DataSourceScript>),
+    #[oai(status = 400)]
+    BadRequest(Json<ErrorBody>),
+    #[oai(status = 404)]
+    NotFound(Json<ErrorBody>),
+    #[oai(status = 500)]
+    InternalError(Json<ErrorBody>),
+}
+
+#[derive(ApiResponse)]
+pub enum BuildDataSourceScriptApiResponse {
+    #[oai(status = 200)]
+    Ok(Json<BuildDataSourceScriptResponse>),
+    #[oai(status = 400)]
+    BadRequest(Json<ErrorBody>),
+    #[oai(status = 404)]
+    NotFound(Json<ErrorBody>),
+    #[oai(status = 500)]
+    InternalError(Json<ErrorBody>),
+}
+
+#[derive(ApiResponse)]
 pub enum TraderDataSourcesApiResponse {
     #[oai(status = 200)]
     Ok(Json<TraderDataSourcesResponse>),
@@ -129,6 +175,106 @@ pub enum ChatCommandApiResponse {
 #[derive(Object)]
 pub struct ErrorBody {
     pub message: String,
+}
+
+#[derive(ApiResponse)]
+pub enum ListChannelsResponse {
+    #[oai(status = 200)]
+    Ok(Json<Vec<Channel>>),
+    #[oai(status = 500)]
+    InternalError(Json<ErrorBody>),
+}
+
+#[derive(ApiResponse)]
+pub enum ChannelMessagesApiResponse {
+    #[oai(status = 200)]
+    Ok(Json<ChannelMessagesResponse>),
+    #[oai(status = 404)]
+    NotFound(Json<ErrorBody>),
+    #[oai(status = 500)]
+    InternalError(Json<ErrorBody>),
+}
+
+#[derive(ApiResponse)]
+pub enum CreateChannelMessageResponse {
+    #[oai(status = 201)]
+    Created(Json<ChannelMessage>),
+    #[oai(status = 400)]
+    BadRequest(Json<ErrorBody>),
+    #[oai(status = 404)]
+    NotFound(Json<ErrorBody>),
+    #[oai(status = 500)]
+    InternalError(Json<ErrorBody>),
+}
+
+#[derive(ApiResponse)]
+pub enum DeleteChannelMessagesResponse {
+    #[oai(status = 200)]
+    Ok,
+    #[oai(status = 500)]
+    InternalError(Json<ErrorBody>),
+}
+
+#[derive(ApiResponse)]
+pub enum TraderPersonaApiResponse {
+    #[oai(status = 200)]
+    Ok(Json<TraderPersona>),
+    #[oai(status = 404)]
+    NotFound(Json<ErrorBody>),
+    #[oai(status = 500)]
+    InternalError(Json<ErrorBody>),
+}
+
+#[derive(ApiResponse)]
+pub enum MdProfileApiResponse {
+    #[oai(status = 200)]
+    Ok(Json<MdProfile>),
+    #[oai(status = 500)]
+    InternalError(Json<ErrorBody>),
+}
+
+#[derive(ApiResponse)]
+pub enum MdChatApiResponse {
+    #[oai(status = 200)]
+    Ok(Json<MdChatResponse>),
+    #[oai(status = 400)]
+    BadRequest(Json<ErrorBody>),
+    #[oai(status = 500)]
+    InternalError(Json<ErrorBody>),
+}
+
+#[derive(ApiResponse)]
+pub enum DataScientistProfileApiResponse {
+    #[oai(status = 200)]
+    Ok(Json<DataScientistProfile>),
+    #[oai(status = 500)]
+    InternalError(Json<ErrorBody>),
+}
+
+#[derive(ApiResponse)]
+pub enum DataScientistChatApiResponse {
+    #[oai(status = 200)]
+    Ok(Json<DataScientistChatResponse>),
+    #[oai(status = 400)]
+    BadRequest(Json<ErrorBody>),
+    #[oai(status = 500)]
+    InternalError(Json<ErrorBody>),
+}
+
+#[derive(ApiResponse)]
+pub enum UserInvestorProfileApiResponse {
+    #[oai(status = 200)]
+    Ok(Json<UserInvestorProfile>),
+    #[oai(status = 500)]
+    InternalError(Json<ErrorBody>),
+}
+
+#[derive(ApiResponse)]
+pub enum EngineChannelContextApiResponse {
+    #[oai(status = 200)]
+    Ok(Json<EngineChannelContext>),
+    #[oai(status = 500)]
+    InternalError(Json<ErrorBody>),
 }
 
 #[derive(ApiResponse)]
@@ -585,6 +731,88 @@ pub enum GetTraderTradeProposalsResponse {
 pub enum TraderTradeProposalMutationResponse {
     #[oai(status = 200)]
     Ok(Json<TraderTradeProposal>),
+    #[oai(status = 400)]
+    BadRequest(Json<ErrorBody>),
+    #[oai(status = 404)]
+    NotFound(Json<ErrorBody>),
+    #[oai(status = 409)]
+    Conflict(Json<ErrorBody>),
+    #[oai(status = 500)]
+    InternalError(Json<ErrorBody>),
+}
+
+#[derive(ApiResponse)]
+pub enum TraderSymbolsApiResponse {
+    #[oai(status = 200)]
+    Ok(Json<TraderSymbolsResponse>),
+    #[oai(status = 400)]
+    BadRequest(Json<ErrorBody>),
+    #[oai(status = 404)]
+    NotFound(Json<ErrorBody>),
+    #[oai(status = 500)]
+    InternalError(Json<ErrorBody>),
+}
+
+#[derive(ApiResponse)]
+pub enum TraderSymbolMutationResponse {
+    #[oai(status = 200)]
+    Ok(Json<TraderSymbol>),
+    #[oai(status = 201)]
+    Created(Json<TraderSymbol>),
+    #[oai(status = 400)]
+    BadRequest(Json<ErrorBody>),
+    #[oai(status = 404)]
+    NotFound(Json<ErrorBody>),
+    #[oai(status = 409)]
+    Conflict(Json<ErrorBody>),
+    #[oai(status = 500)]
+    InternalError(Json<ErrorBody>),
+}
+
+#[derive(ApiResponse)]
+pub enum TraderPortfolioProposalsApiResponse {
+    #[oai(status = 200)]
+    Ok(Json<TraderPortfolioProposalsResponse>),
+    #[oai(status = 404)]
+    NotFound(Json<ErrorBody>),
+    #[oai(status = 500)]
+    InternalError(Json<ErrorBody>),
+}
+
+#[derive(ApiResponse)]
+pub enum TraderPortfolioProposalApiResponse {
+    #[oai(status = 200)]
+    Ok(Json<TraderPortfolioProposalDetail>),
+    #[oai(status = 201)]
+    Created(Json<TraderPortfolioProposalDetail>),
+    #[oai(status = 400)]
+    BadRequest(Json<ErrorBody>),
+    #[oai(status = 404)]
+    NotFound(Json<ErrorBody>),
+    #[oai(status = 409)]
+    Conflict(Json<ErrorBody>),
+    #[oai(status = 500)]
+    InternalError(Json<ErrorBody>),
+}
+
+#[derive(ApiResponse)]
+pub enum SuggestTraderSymbolsApiResponse {
+    #[oai(status = 200)]
+    Ok(Json<SuggestTraderSymbolsResponse>),
+    #[oai(status = 400)]
+    BadRequest(Json<ErrorBody>),
+    #[oai(status = 404)]
+    NotFound(Json<ErrorBody>),
+    #[oai(status = 409)]
+    Conflict(Json<ErrorBody>),
+    #[oai(status = 500)]
+    InternalError(Json<ErrorBody>),
+}
+
+#[derive(ApiResponse)]
+pub enum TraderChatApiResponse {
+    #[oai(status = 200)]
+    Ok(Json<TraderChatResponse>),
     #[oai(status = 400)]
     BadRequest(Json<ErrorBody>),
     #[oai(status = 404)]

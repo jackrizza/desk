@@ -141,6 +141,15 @@ body {
   background: color-mix(in srgb, var(--color-primary) 10%, transparent);
 }
 
+.app-subnav-create {
+  background: color-mix(in srgb, var(--color-primary) 14%, transparent);
+  color: var(--color-primary);
+}
+
+.app-subnav-create:hover {
+  background: color-mix(in srgb, var(--color-primary) 18%, transparent);
+}
+
 .app-modal-backdrop {
   background: var(--color-overlay);
 }
@@ -206,6 +215,42 @@ body {
 .trading-mode-toggle__button--disabled:hover,
 .trading-mode-toggle__button:disabled:hover {
   background: transparent;
+}
+
+.channel-message {
+  border: 1px solid var(--color-border);
+  background: var(--color-surface-strong);
+}
+
+.channel-message--user {
+  border-left: 4px solid var(--color-primary);
+}
+
+.channel-message--trader {
+  border-left: 4px solid var(--color-warning);
+}
+
+.channel-message--md {
+  border-left: 4px solid var(--color-error);
+}
+
+.channel-message--system {
+  border-left: 4px solid var(--color-muted-text);
+}
+
+.channel-badge {
+  background: color-mix(in srgb, var(--color-primary) 12%, var(--color-surface));
+  color: var(--color-text);
+}
+
+.prose p {
+  margin: 0.35rem 0;
+}
+
+.prose ul,
+.prose ol {
+  margin: 0.5rem 0;
+  padding-left: 1.25rem;
 }
 
 @keyframes app-route-spin {

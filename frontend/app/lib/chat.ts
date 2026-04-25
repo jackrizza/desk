@@ -4,16 +4,29 @@ import {
   OPENAI_DEFAULT_MODEL,
   OPENAI_SETTINGS_CHANGE_EVENT,
 } from "./openai";
-import { deskApi, type ChatCommandResponse } from "./api";
+import {
+  deskApi,
+  type ChatCommandResponse,
+  type DataScientistChatAction,
+  type Trader,
+} from "./api";
 
 export const CHAT_COMMAND_EXECUTED_EVENT = "desk-chat-command-executed";
+const CHAT_TARGET_STORAGE_KEY = "chat:selectedTarget";
 
 export type ChatMessage = {
   id: string;
   role: "assistant" | "user";
   content: string;
   createdAt: string;
+  dataSourceResult?: DataScientistChatAction;
 };
+
+export type ChatTarget =
+  | { kind: "desk" }
+  | { kind: "md" }
+  | { kind: "data_scientist" }
+  | { kind: "trader"; trader_id: string; trader_name: string };
 
 export type ChatContext =
   | {
@@ -87,12 +100,26 @@ function createMessage(
   };
 }
 
-function createWelcomeMessage(page: ChatContext["page"]) {
-  return createMessage("assistant", getWelcomeMessage(page), "");
+function createWelcomeMessage(page: ChatContext["page"], target: ChatTarget = { kind: "desk" }, trader?: Trader) {
+  return createMessage("assistant", getWelcomeMessage(page, target, trader), "");
 }
 
-function getWelcomeMessage(page: ChatContext["page"]) {
-	  return page === "home"
+function getWelcomeMessage(page: ChatContext["page"], target: ChatTarget, trader?: Trader) {
+  if (target.kind === "md") {
+    return "You are talking with the MD.\nRole: monitors traders and reduces drift.";
+  }
+  if (target.kind === "data_scientist") {
+    return "You are talking with the Data Scientist.\nRole: creates and improves data sources.";
+  }
+  if (target.kind === "trader") {
+    return [
+      `You are talking with ${target.trader_name}.`,
+      `Freedom level: ${trader?.freedom_level ?? "unknown"}`,
+      `Status: ${trader?.status ?? "unknown"}`,
+      `Perspective: ${trader?.fundamental_perspective ?? "No perspective loaded yet."}`,
+    ].join("\n");
+  }
+  return page === "home"
 	    ? "Portfolio assistant is live. Ask about NAV, gain, portfolio scope, strategies, or positions on this dashboard."
 	    : page === "market"
 	      ? "Market assistant is live. Ask about the active symbol, range, interval, last close, or chart state on this screen."
@@ -465,7 +492,23 @@ async function buildOpenAIReply(
   return text;
 }
 
-function getStorageKey(context: ChatContext) {
+function getTargetStorageId(target: ChatTarget) {
+  if (target.kind === "trader") {
+    return `trader:${target.trader_id}`;
+  }
+  return target.kind;
+}
+
+function getStorageKey(context: ChatContext, target: ChatTarget = { kind: "desk" }) {
+  if (target.kind === "trader") {
+    return `desk-chat-history-trader-${target.trader_id}`;
+  }
+  if (target.kind === "md") {
+    return "desk-chat-history-md";
+  }
+  if (target.kind === "data_scientist") {
+    return "desk-chat-history-data-scientist";
+  }
   if (context.page === "project") {
     return `desk-chat-history-project-${context.projectId}`;
   }
@@ -482,26 +525,59 @@ function getStorageKey(context: ChatContext) {
 	  return "desk-chat-history-home";
 }
 
-function loadMessages(context: ChatContext) {
+function readStoredTarget(): ChatTarget {
   if (typeof window === "undefined") {
-    return [createWelcomeMessage(context.page)];
+    return { kind: "desk" };
+  }
+  try {
+    const parsed = JSON.parse(
+      window.localStorage.getItem(CHAT_TARGET_STORAGE_KEY) ?? "",
+    ) as ChatTarget;
+    if (parsed?.kind === "desk" || parsed?.kind === "md" || parsed?.kind === "data_scientist") {
+      return parsed;
+    }
+    if (parsed?.kind === "trader" && parsed.trader_id && parsed.trader_name) {
+      return parsed;
+    }
+  } catch {
+    // fall back to Desk
+  }
+  return { kind: "desk" };
+}
+
+function writeStoredTarget(target: ChatTarget) {
+  if (typeof window === "undefined") {
+    return;
+  }
+  window.localStorage.setItem(CHAT_TARGET_STORAGE_KEY, JSON.stringify(target));
+}
+
+function loadMessages(context: ChatContext, target: ChatTarget, trader?: Trader) {
+  if (typeof window === "undefined") {
+    return [createWelcomeMessage(context.page, target, trader)];
   }
 
   try {
-    const raw = window.localStorage.getItem(getStorageKey(context));
+    const raw = window.localStorage.getItem(getStorageKey(context, target));
     if (!raw) {
-      return [createWelcomeMessage(context.page)];
+      return [createWelcomeMessage(context.page, target, trader)];
     }
 
     const parsed = JSON.parse(raw) as ChatMessage[];
-    return parsed.length ? parsed : [createWelcomeMessage(context.page)];
+    return parsed.length ? parsed : [createWelcomeMessage(context.page, target, trader)];
   } catch {
-    return [createWelcomeMessage(context.page)];
+    return [createWelcomeMessage(context.page, target, trader)];
   }
 }
 
 export function useDeskChat(context: ChatContext) {
-  const storageKey = getStorageKey(context);
+  const [chatTarget, setChatTargetState] = useState<ChatTarget>(() => readStoredTarget());
+  const [chatTraders, setChatTraders] = useState<Trader[]>([]);
+  const selectedTrader =
+    chatTarget.kind === "trader"
+      ? chatTraders.find((trader) => trader.id === chatTarget.trader_id)
+      : undefined;
+  const storageKey = getStorageKey(context, chatTarget);
   const [messages, setMessages] = useState<ChatMessage[]>(() => [
     createWelcomeMessage(context.page),
   ]);
@@ -510,21 +586,49 @@ export function useDeskChat(context: ChatContext) {
   const [pendingConfirmation, setPendingConfirmation] =
     useState<ChatCommandResponse | null>(null);
   const contextRef = useRef(context);
+  const sendInFlightRef = useRef(false);
 
   useEffect(() => {
     contextRef.current = context;
   }, [context]);
 
   useEffect(() => {
-    const nextMessages = loadMessages(context);
+    const nextMessages = loadMessages(context, chatTarget, selectedTrader);
     setMessages((current) =>
       JSON.stringify(current) === JSON.stringify(nextMessages) ? current : nextMessages,
     );
-  }, [storageKey]);
+  }, [storageKey, selectedTrader?.id, selectedTrader?.status, selectedTrader?.freedom_level]);
 
   useEffect(() => {
     window.localStorage.setItem(storageKey, JSON.stringify(messages));
   }, [messages, storageKey]);
+
+  useEffect(() => {
+    let cancelled = false;
+    async function loadTraders() {
+      try {
+        const traders = await deskApi.listTraders();
+        if (cancelled) {
+          return;
+        }
+        setChatTraders(traders);
+        if (
+          chatTarget.kind === "trader" &&
+          !traders.some((trader) => trader.id === chatTarget.trader_id)
+        ) {
+          setChatTarget({ kind: "desk" });
+        }
+      } catch {
+        // Keep chat usable even if target options fail to refresh.
+      }
+    }
+    void loadTraders();
+    const intervalId = window.setInterval(() => void loadTraders(), 30000);
+    return () => {
+      cancelled = true;
+      window.clearInterval(intervalId);
+    };
+  }, [chatTarget.kind === "trader" ? chatTarget.trader_id : "desk"]);
 
   useEffect(() => {
     const syncApiKey = () => {
@@ -545,9 +649,23 @@ export function useDeskChat(context: ChatContext) {
   }, []);
 
   const suggestions = useMemo(
-    () =>
-	      context.page === "home"
-	        ? [
+    () => {
+      if (chatTarget.kind === "md") {
+        return [
+          "Are any traders drifting from their goals?",
+          "Where do traders disagree right now?",
+          "What information is missing before review?",
+        ];
+      }
+      if (chatTarget.kind === "data_scientist") {
+        return [
+          "Create a python data source from https://example.com",
+          "Show data source quality risks",
+          "How should I improve this collector?",
+        ];
+      }
+      return context.page === "home"
+        ? [
             "What is the scoped NAV?",
             "How many open positions do I have?",
             "What portfolios are in scope?",
@@ -571,18 +689,20 @@ export function useDeskChat(context: ChatContext) {
 	                  "Stop Macro Scout",
 	                ]
 	              : [
-	                  "Show all data sources",
-	                  "Add an RSS data source called Fed News using https://www.federalreserve.gov/feeds/press_all.xml",
-	                  "Show recent items from Fed News",
-	                ],
-    [context.page],
+              "Show all data sources",
+              "Add an RSS data source called Fed News using https://www.federalreserve.gov/feeds/press_all.xml",
+              "Show recent items from Fed News",
+            ];
+    },
+    [context.page, chatTarget.kind],
   );
 
   async function sendMessage(content: string) {
     const trimmed = content.trim();
-    if (!trimmed || pending) {
+    if (!trimmed || pending || sendInFlightRef.current) {
       return;
     }
+    sendInFlightRef.current = true;
 
     const userMessage = createMessage("user", trimmed);
     const nextHistory = [...messages, userMessage];
@@ -590,7 +710,11 @@ export function useDeskChat(context: ChatContext) {
     setPending(true);
 
     try {
-      if (pendingConfirmation && /^(yes|y|confirm|confirmed|do it)$/i.test(trimmed)) {
+      if (
+        chatTarget.kind === "desk" &&
+        pendingConfirmation &&
+        /^(yes|y|confirm|confirmed|do it)$/i.test(trimmed)
+      ) {
         const commandReply = await deskApi.sendChatCommand({
           message: trimmed,
           context: {
@@ -614,11 +738,77 @@ export function useDeskChat(context: ChatContext) {
         }
       }
 
-      if (pendingConfirmation && /^(no|n|cancel|stop)$/i.test(trimmed)) {
+      if (
+        chatTarget.kind === "desk" &&
+        pendingConfirmation &&
+        /^(no|n|cancel|stop)$/i.test(trimmed)
+      ) {
         setPendingConfirmation(null);
         setMessages((current) => [
           ...current,
           createMessage("assistant", "Cancelled the pending command."),
+        ]);
+        return;
+      }
+
+      if (chatTarget.kind === "trader") {
+        const reply = await deskApi.sendTraderChatMessage(chatTarget.trader_id, {
+          message: trimmed,
+          conversation: messages
+            .filter((message) => message.createdAt)
+            .map((message) => ({
+              role: message.role,
+              content: message.content,
+            })),
+        });
+        setMessages((current) => [
+          ...current,
+          createMessage("assistant", reply.reply),
+        ]);
+        return;
+      }
+
+      if (chatTarget.kind === "md") {
+        const reply = await deskApi.sendMdChatMessage({
+          message: trimmed,
+          conversation: messages
+            .filter((message) => message.createdAt)
+            .map((message) => ({
+              role: message.role,
+              content: message.content,
+            })),
+        });
+        setMessages((current) => [
+          ...current,
+          createMessage("assistant", reply.reply),
+        ]);
+        return;
+      }
+
+      if (chatTarget.kind === "data_scientist") {
+        const reply = await deskApi.sendDataScientistChatMessage({
+          message: trimmed,
+          conversation: messages
+            .filter((message) => message.createdAt)
+            .map((message) => ({
+              role: message.role,
+              content: message.content,
+            })),
+        });
+        const created = reply.actions.find((action) => action.type === "data_source_created");
+        if (created) {
+          window.dispatchEvent(
+            new CustomEvent(CHAT_COMMAND_EXECUTED_EVENT, {
+              detail: reply,
+            }),
+          );
+        }
+        setMessages((current) => [
+          ...current,
+          {
+            ...createMessage("assistant", reply.reply),
+            dataSourceResult: created,
+          },
         ]);
         return;
       }
@@ -665,13 +855,20 @@ export function useDeskChat(context: ChatContext) {
           : "Chat failed. Check your OpenAI API key and try again.";
       setMessages((current) => [...current, createMessage("assistant", message)]);
     } finally {
+      sendInFlightRef.current = false;
       setPending(false);
     }
   }
 
   function clearMessages() {
-    const welcome = createWelcomeMessage(context.page);
+    const welcome = createWelcomeMessage(context.page, chatTarget, selectedTrader);
     setMessages([welcome]);
+  }
+
+  function setChatTarget(target: ChatTarget) {
+    setPendingConfirmation(null);
+    setChatTargetState(target);
+    writeStoredTarget(target);
   }
 
   return {
@@ -681,5 +878,8 @@ export function useDeskChat(context: ChatContext) {
     sendMessage,
     clearMessages,
     usingOpenAI: apiKeyAvailable,
+    chatTarget,
+    setChatTarget,
+    chatTraders,
   };
 }

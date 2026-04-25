@@ -29,7 +29,7 @@ impl ScrapperDb {
             CREATE TABLE IF NOT EXISTS scrapper.data_sources (
                 id UUID PRIMARY KEY,
                 name TEXT NOT NULL,
-                source_type TEXT NOT NULL CHECK (source_type IN ('rss', 'web_page', 'manual_note', 'placeholder_api')),
+                source_type TEXT NOT NULL CHECK (source_type IN ('rss', 'web_page', 'manual_note', 'placeholder_api', 'python_script')),
                 url TEXT NULL,
                 config_json JSONB NULL,
                 enabled BOOLEAN NOT NULL DEFAULT TRUE,
@@ -37,6 +37,25 @@ impl ScrapperDb {
                 last_checked_at TIMESTAMPTZ NULL,
                 last_success_at TIMESTAMPTZ NULL,
                 last_error TEXT NULL,
+                created_at TIMESTAMPTZ NOT NULL,
+                updated_at TIMESTAMPTZ NOT NULL
+            );
+            "#,
+            "ALTER TABLE scrapper.data_sources DROP CONSTRAINT IF EXISTS data_sources_source_type_check;",
+            r#"
+            ALTER TABLE scrapper.data_sources
+            ADD CONSTRAINT data_sources_source_type_check
+            CHECK (source_type IN ('rss', 'web_page', 'manual_note', 'placeholder_api', 'python_script'));
+            "#,
+            r#"
+            CREATE TABLE IF NOT EXISTS scrapper.data_source_scripts (
+                data_source_id UUID PRIMARY KEY REFERENCES scrapper.data_sources(id) ON DELETE CASCADE,
+                language TEXT NOT NULL DEFAULT 'python',
+                script_text TEXT NOT NULL,
+                script_hash TEXT NULL,
+                last_build_status TEXT NULL CHECK (last_build_status IS NULL OR last_build_status IN ('not_built', 'success', 'failed')),
+                last_build_output TEXT NULL,
+                last_built_at TIMESTAMPTZ NULL,
                 created_at TIMESTAMPTZ NOT NULL,
                 updated_at TIMESTAMPTZ NOT NULL
             );

@@ -63,6 +63,37 @@ pub struct DataSourceEvent {
 }
 
 #[derive(Object, Serialize, Deserialize, Clone, Debug, Default)]
+pub struct DataSourceScript {
+    pub data_source_id: String,
+    pub language: String,
+    pub script_text: String,
+    pub script_hash: Option<String>,
+    pub last_build_status: Option<String>,
+    pub last_build_output: Option<String>,
+    pub last_built_at: Option<String>,
+    pub created_at: String,
+    pub updated_at: String,
+}
+
+#[derive(Object, Serialize, Deserialize, Clone, Debug, Default)]
+pub struct UpdateDataSourceScriptRequest {
+    pub script_text: String,
+}
+
+#[derive(Object, Serialize, Deserialize, Clone, Debug, Default)]
+pub struct BuildDataSourceScriptRequest {
+    pub script_text: Option<String>,
+}
+
+#[derive(Object, Serialize, Deserialize, Clone, Debug, Default)]
+pub struct BuildDataSourceScriptResponse {
+    pub success: bool,
+    pub status: String,
+    pub output: String,
+    pub script_hash: Option<String>,
+}
+
+#[derive(Object, Serialize, Deserialize, Clone, Debug, Default)]
 pub struct TraderDataSourceAssignment {
     pub trader_id: String,
     pub data_source_id: String,

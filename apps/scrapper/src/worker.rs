@@ -4,11 +4,21 @@ use anyhow::Result;
 use tokio::time;
 use tracing::{error, info, warn};
 
-use crate::{config::ScrapperConfig, db::ScrapperDb, sources::SourcePoller};
+use crate::{
+    config::ScrapperConfig,
+    db::ScrapperDb,
+    python_runtime::{PythonRuntime, PythonRuntimeConfig},
+    sources::SourcePoller,
+};
 
 pub async fn run_worker(config: ScrapperConfig) -> Result<()> {
     let db = ScrapperDb::connect(&config.database_url).await?;
-    let poller = SourcePoller::new()?;
+    let python_runtime = PythonRuntime::new(PythonRuntimeConfig {
+        venv_path: config.python_venv_path.clone(),
+        max_items: config.python_max_items,
+        timeout_seconds: config.python_timeout_seconds,
+    })?;
+    let poller = SourcePoller::new(config.openapi_base_url.clone(), python_runtime)?;
     let mut interval = time::interval(Duration::from_secs(config.poll_interval_seconds));
     interval.set_missed_tick_behavior(time::MissedTickBehavior::Delay);
     let shutdown = shutdown_signal();
@@ -18,6 +28,7 @@ pub async fn run_worker(config: ScrapperConfig) -> Result<()> {
         scrapper_name = %config.scrapper_name,
         openapi_base_url = %config.openapi_base_url,
         poll_interval_seconds = config.poll_interval_seconds,
+        python_venv_path = %config.python_venv_path,
         "scrapper started"
     );
     let _ = db
@@ -70,7 +81,11 @@ async fn run_iteration(db: &ScrapperDb, poller: &SourcePoller) -> Result<()> {
                 let _ = db
                     .event(
                         Some(&source.id),
-                        "source_polled",
+                        if source.source_type == "python_script" {
+                            "python_script_polled"
+                        } else {
+                            "source_polled"
+                        },
                         &format!("Polled {} and inserted {} new items", source.name, inserted),
                     )
                     .await;
@@ -80,7 +95,15 @@ async fn run_iteration(db: &ScrapperDb, poller: &SourcePoller) -> Result<()> {
                 warn!(source_id = %source.id, error = %err, "source poll failed");
                 db.mark_error(&source.id, &err.to_string()).await?;
                 let _ = db
-                    .event(Some(&source.id), "source_poll_failed", &err.to_string())
+                    .event(
+                        Some(&source.id),
+                        if source.source_type == "python_script" {
+                            "python_script_failed"
+                        } else {
+                            "source_poll_failed"
+                        },
+                        &err.to_string(),
+                    )
                     .await;
             }
         }

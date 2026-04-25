@@ -1,6 +1,7 @@
 use models::chat_commands::ChatCommandRequest;
 use models::data_sources::{
-    CreateDataSourceRequest, UpdateDataSourceRequest, UpdateTraderDataSourcesRequest,
+    BuildDataSourceScriptRequest, CreateDataSourceRequest, UpdateDataSourceRequest,
+    UpdateDataSourceScriptRequest, UpdateTraderDataSourcesRequest,
 };
 use models::engine::{
     ActiveSymbolsResponse, EngineEventRequest, EngineHealthResponse, EngineHeartbeatRequest,
@@ -8,11 +9,19 @@ use models::engine::{
 use models::paper::{CreatePaperAccountRequest, CreatePaperOrderRequest};
 use models::raw::{RawStockData, StockIndicatorsResponse};
 use models::{
+    channels::{
+        CreateChannelMessageRequest, CreateUserChannelMessageRequest, DataScientistChatRequest,
+        MdChatRequest, TraderPersonaUpdateRequest, UpdateDataScientistProfileRequest,
+        UpdateMdProfileRequest, UpdateUserInvestorProfileRequest,
+    },
     portfolio::{Portfolio, Position},
     projects::Project,
     trader::{
-        CreateTraderEventRequest, CreateTraderRequest, CreateTraderTradeProposalRequest,
-        UpdateTraderRequest, UpsertTraderRuntimeStateRequest,
+        BulkUpsertTraderSymbolsRequest, CreateTraderEventRequest,
+        CreateTraderPortfolioProposalRequest, CreateTraderRequest, CreateTraderSymbolRequest,
+        CreateTraderTradeProposalRequest, ReviewTraderPortfolioProposalRequest,
+        SuggestTraderSymbolsRequest, TraderChatRequest, UpdateTraderRequest,
+        UpdateTraderSymbolRequest, UpsertTraderRuntimeStateRequest,
     },
     trading::{
         CreateStrategySignalRequest, UpdateStrategyRiskConfigRequest,
@@ -42,6 +51,8 @@ use tracing_subscriber::FmtSubscriber;
 use env_logger;
 use log::{error, info};
 
+mod agent_chat;
+mod channels;
 mod chat_commands;
 mod data_sources;
 mod helpers;
@@ -50,29 +61,38 @@ mod secrets;
 mod strategy_execution;
 mod strategy_risk;
 mod strategy_trading;
+mod trader_chat;
 mod traders;
 
 use helpers::{
-    ActiveSymbolsConfigResponse, ApiTags, CancelPaperOrderResponse, ChatCommandApiResponse,
-    CreateDataSourceResponse, CreatePaperAccountResponse, CreatePortfolioResponse,
-    CreatePositionResponse, CreateProjectResponse, CreateStrategySignalResponse,
-    CreateTraderEventResponse, CreateTraderResponse, DeleteDataSourceResponse,
-    DeletePortfolioResponse, DeletePositionResponse, DeleteProjectResponse, DeleteTraderResponse,
+    ActiveSymbolsConfigResponse, ApiTags, BuildDataSourceScriptApiResponse,
+    CancelPaperOrderResponse, ChannelMessagesApiResponse, ChatCommandApiResponse,
+    CreateChannelMessageResponse, CreateDataSourceResponse, CreatePaperAccountResponse,
+    CreatePortfolioResponse, CreatePositionResponse, CreateProjectResponse,
+    CreateStrategySignalResponse, CreateTraderEventResponse, CreateTraderResponse,
+    DataScientistChatApiResponse, DataScientistProfileApiResponse, DeleteChannelMessagesResponse,
+    DeleteDataSourceResponse, DeletePortfolioResponse, DeletePositionResponse,
+    DeleteProjectResponse, DeleteTraderResponse, EngineChannelContextApiResponse,
     EngineMutationResponse, EngineStrategyConfigApiResponse, EngineTraderConfigApiResponse,
     ExecutePaperOrderResponse, GetDataSourceEventsResponse, GetDataSourceItemsResponse,
-    GetDataSourceResponse, GetPaperAccountResponse, GetPortfolioResponse, GetPositionResponse,
-    GetProjectResponse, GetStrategyRiskConfigResponse, GetStrategyRuntimeStateResponse,
-    GetStrategySignalsResponse, GetStrategyTradingConfigResponse, GetTraderEventsResponse,
-    GetTraderResponse, GetTraderRuntimeStateResponse, GetTraderTradeProposalsResponse,
-    ListDataSourcesResponse, ListPaperAccountsResponse, ListPaperEventsResponse,
-    ListPaperFillsResponse, ListPaperOrdersResponse, ListPaperPositionsResponse,
-    ListPortfoliosResponse, ListPositionsResponse, ListProjectsResponse, ListTradersResponse,
-    PaperAccountSummaryApiResponse, StrategyRiskMutationResponse, TraderDataSourcesApiResponse,
-    TraderMutationResponse, TraderTradeProposalMutationResponse, UpdateDataSourceResponse,
+    GetDataSourceResponse, GetDataSourceScriptResponse, GetPaperAccountResponse,
+    GetPortfolioResponse, GetPositionResponse, GetProjectResponse, GetStrategyRiskConfigResponse,
+    GetStrategyRuntimeStateResponse, GetStrategySignalsResponse, GetStrategyTradingConfigResponse,
+    GetTraderEventsResponse, GetTraderResponse, GetTraderRuntimeStateResponse,
+    GetTraderTradeProposalsResponse, ListChannelsResponse, ListDataSourcesResponse,
+    ListPaperAccountsResponse, ListPaperEventsResponse, ListPaperFillsResponse,
+    ListPaperOrdersResponse, ListPaperPositionsResponse, ListPortfoliosResponse,
+    ListPositionsResponse, ListProjectsResponse, ListTradersResponse, MdChatApiResponse,
+    MdProfileApiResponse, PaperAccountSummaryApiResponse, StrategyRiskMutationResponse,
+    SuggestTraderSymbolsApiResponse, TraderChatApiResponse, TraderDataSourcesApiResponse,
+    TraderMutationResponse, TraderPersonaApiResponse, TraderPortfolioProposalApiResponse,
+    TraderPortfolioProposalsApiResponse, TraderSymbolMutationResponse, TraderSymbolsApiResponse,
+    TraderTradeProposalMutationResponse, UpdateDataSourceResponse, UpdateDataSourceScriptResponse,
     UpdatePortfolioResponse, UpdatePositionResponse, UpdateProjectResponse,
     UpdateStrategyRiskConfigResponse, UpdateStrategySignalResponse,
     UpdateStrategyTradingConfigResponse, UpdateTraderResponse, UpsertStrategyRuntimeStateResponse,
-    UpsertTraderRuntimeStateResponse, error_message, internal_error,
+    UpsertTraderRuntimeStateResponse, UserInvestorProfileApiResponse, error_message,
+    internal_error,
 };
 
 struct Api {
@@ -156,6 +176,34 @@ impl Api {
         match traders::engine_config(&self.database).await {
             Ok(configs) => EngineTraderConfigApiResponse::Ok(Json(configs)),
             Err(err) => EngineTraderConfigApiResponse::InternalError(error_message(err.message)),
+        }
+    }
+
+    #[oai(
+        path = "/engine/channel-context",
+        method = "get",
+        tag = "ApiTags::Engine"
+    )]
+    async fn engine_channel_context(&self) -> EngineChannelContextApiResponse {
+        match channels::engine_context(&self.database).await {
+            Ok(context) => EngineChannelContextApiResponse::Ok(Json(context)),
+            Err(err) => EngineChannelContextApiResponse::InternalError(error_message(err.message)),
+        }
+    }
+
+    #[oai(
+        path = "/engine/channels/:channel_name/messages",
+        method = "post",
+        tag = "ApiTags::Engine"
+    )]
+    async fn engine_channel_message(
+        &self,
+        channel_name: Path<String>,
+        request: Json<CreateChannelMessageRequest>,
+    ) -> CreateChannelMessageResponse {
+        match channels::create_engine_message(&self.database, &channel_name.0, request.0).await {
+            Ok(message) => CreateChannelMessageResponse::Created(Json(message)),
+            Err(err) => map_channel_message_error(err),
         }
     }
 
@@ -348,6 +396,22 @@ impl Api {
         }
     }
 
+    #[oai(
+        path = "/engine/traders/:trader_id/proposals",
+        method = "post",
+        tag = "ApiTags::Engine"
+    )]
+    async fn engine_trader_portfolio_proposals(
+        &self,
+        trader_id: Path<String>,
+        request: Json<CreateTraderPortfolioProposalRequest>,
+    ) -> TraderPortfolioProposalApiResponse {
+        match traders::create_portfolio_proposal(&self.database, &trader_id.0, request.0).await {
+            Ok(proposal) => TraderPortfolioProposalApiResponse::Created(Json(proposal)),
+            Err(err) => map_trader_portfolio_proposal_error(err),
+        }
+    }
+
     #[oai(path = "/stock_data", method = "get")]
     async fn stock_data(
         &self,
@@ -407,6 +471,183 @@ impl Api {
                     unsupported: requested,
                 })
             }
+        }
+    }
+
+    #[oai(path = "/channels", method = "get", tag = "ApiTags::Channel")]
+    async fn list_channels(&self) -> ListChannelsResponse {
+        match channels::list_channels(&self.database).await {
+            Ok(channels) => ListChannelsResponse::Ok(Json(channels)),
+            Err(err) => ListChannelsResponse::InternalError(error_message(err.message)),
+        }
+    }
+
+    #[oai(
+        path = "/channels/:channel_id/messages",
+        method = "get",
+        tag = "ApiTags::Channel"
+    )]
+    async fn list_channel_messages(
+        &self,
+        channel_id: Path<String>,
+        limit: Query<Option<i64>>,
+        before: Query<Option<String>>,
+        after: Query<Option<String>>,
+    ) -> ChannelMessagesApiResponse {
+        match channels::list_messages(
+            &self.database,
+            &channel_id.0,
+            limit.0,
+            before.0.as_deref(),
+            after.0.as_deref(),
+        )
+        .await
+        {
+            Ok(messages) => ChannelMessagesApiResponse::Ok(Json(messages)),
+            Err(err) => match err.kind {
+                channels::ChannelErrorKind::NotFound => {
+                    ChannelMessagesApiResponse::NotFound(error_message(err.message))
+                }
+                _ => ChannelMessagesApiResponse::InternalError(error_message(err.message)),
+            },
+        }
+    }
+
+    #[oai(
+        path = "/channels/:channel_id/messages",
+        method = "post",
+        tag = "ApiTags::Channel"
+    )]
+    async fn create_channel_message(
+        &self,
+        channel_id: Path<String>,
+        request: Json<CreateUserChannelMessageRequest>,
+    ) -> CreateChannelMessageResponse {
+        match channels::create_user_message(&self.database, &channel_id.0, request.0).await {
+            Ok(message) => CreateChannelMessageResponse::Created(Json(message)),
+            Err(err) => map_channel_message_error(err),
+        }
+    }
+
+    #[oai(
+        path = "/channels/messages",
+        method = "delete",
+        tag = "ApiTags::Settings"
+    )]
+    async fn clear_channel_messages(&self) -> DeleteChannelMessagesResponse {
+        match channels::clear_messages(&self.database).await {
+            Ok(_) => DeleteChannelMessagesResponse::Ok,
+            Err(err) => DeleteChannelMessagesResponse::InternalError(error_message(err.message)),
+        }
+    }
+
+    #[oai(path = "/md-profile", method = "get", tag = "ApiTags::Settings")]
+    async fn get_md_profile(&self) -> MdProfileApiResponse {
+        match channels::get_md_profile(&self.database).await {
+            Ok(profile) => MdProfileApiResponse::Ok(Json(profile)),
+            Err(err) => MdProfileApiResponse::InternalError(error_message(err.message)),
+        }
+    }
+
+    #[oai(path = "/md-profile", method = "put", tag = "ApiTags::Settings")]
+    async fn update_md_profile(
+        &self,
+        request: Json<UpdateMdProfileRequest>,
+    ) -> MdProfileApiResponse {
+        match channels::update_md_profile(&self.database, request.0).await {
+            Ok(profile) => MdProfileApiResponse::Ok(Json(profile)),
+            Err(err) => MdProfileApiResponse::InternalError(error_message(err.message)),
+        }
+    }
+
+    #[oai(path = "/md-profile/chat", method = "post", tag = "ApiTags::Settings")]
+    async fn md_profile_chat(&self, request: Json<MdChatRequest>) -> MdChatApiResponse {
+        match agent_chat::md_chat(&self.database, request.0).await {
+            Ok(response) => MdChatApiResponse::Ok(Json(response)),
+            Err(err) => match err.kind {
+                agent_chat::AgentChatErrorKind::BadRequest => {
+                    MdChatApiResponse::BadRequest(error_message(err.message))
+                }
+                agent_chat::AgentChatErrorKind::Internal => {
+                    MdChatApiResponse::InternalError(error_message(err.message))
+                }
+            },
+        }
+    }
+
+    #[oai(
+        path = "/data-scientist-profile",
+        method = "get",
+        tag = "ApiTags::Settings"
+    )]
+    async fn get_data_scientist_profile(&self) -> DataScientistProfileApiResponse {
+        match channels::get_data_scientist_profile(&self.database).await {
+            Ok(profile) => DataScientistProfileApiResponse::Ok(Json(profile)),
+            Err(err) => DataScientistProfileApiResponse::InternalError(error_message(err.message)),
+        }
+    }
+
+    #[oai(
+        path = "/data-scientist-profile",
+        method = "put",
+        tag = "ApiTags::Settings"
+    )]
+    async fn update_data_scientist_profile(
+        &self,
+        request: Json<UpdateDataScientistProfileRequest>,
+    ) -> DataScientistProfileApiResponse {
+        match channels::update_data_scientist_profile(&self.database, request.0).await {
+            Ok(profile) => DataScientistProfileApiResponse::Ok(Json(profile)),
+            Err(err) => DataScientistProfileApiResponse::InternalError(error_message(err.message)),
+        }
+    }
+
+    #[oai(
+        path = "/data-scientist-profile/chat",
+        method = "post",
+        tag = "ApiTags::Settings"
+    )]
+    async fn data_scientist_profile_chat(
+        &self,
+        request: Json<DataScientistChatRequest>,
+    ) -> DataScientistChatApiResponse {
+        match agent_chat::data_scientist_chat(&self.database, request.0).await {
+            Ok(response) => DataScientistChatApiResponse::Ok(Json(response)),
+            Err(err) => match err.kind {
+                agent_chat::AgentChatErrorKind::BadRequest => {
+                    DataScientistChatApiResponse::BadRequest(error_message(err.message))
+                }
+                agent_chat::AgentChatErrorKind::Internal => {
+                    DataScientistChatApiResponse::InternalError(error_message(err.message))
+                }
+            },
+        }
+    }
+
+    #[oai(
+        path = "/settings/investor-profile",
+        method = "get",
+        tag = "ApiTags::Settings"
+    )]
+    async fn get_investor_profile(&self) -> UserInvestorProfileApiResponse {
+        match channels::get_investor_profile(&self.database).await {
+            Ok(profile) => UserInvestorProfileApiResponse::Ok(Json(profile)),
+            Err(err) => UserInvestorProfileApiResponse::InternalError(error_message(err.message)),
+        }
+    }
+
+    #[oai(
+        path = "/settings/investor-profile",
+        method = "put",
+        tag = "ApiTags::Settings"
+    )]
+    async fn update_investor_profile(
+        &self,
+        request: Json<UpdateUserInvestorProfileRequest>,
+    ) -> UserInvestorProfileApiResponse {
+        match channels::update_investor_profile(&self.database, request.0).await {
+            Ok(profile) => UserInvestorProfileApiResponse::Ok(Json(profile)),
+            Err(err) => UserInvestorProfileApiResponse::InternalError(error_message(err.message)),
         }
     }
 
@@ -821,6 +1062,73 @@ impl Api {
         }
     }
 
+    #[oai(
+        path = "/traders/:trader_id/persona",
+        method = "get",
+        tag = "ApiTags::Trader"
+    )]
+    async fn get_trader_persona(&self, trader_id: Path<String>) -> TraderPersonaApiResponse {
+        match channels::get_trader_persona(&self.database, &trader_id.0).await {
+            Ok(persona) => TraderPersonaApiResponse::Ok(Json(persona)),
+            Err(err) => match err.kind {
+                channels::ChannelErrorKind::NotFound => {
+                    TraderPersonaApiResponse::NotFound(error_message(err.message))
+                }
+                _ => TraderPersonaApiResponse::InternalError(error_message(err.message)),
+            },
+        }
+    }
+
+    #[oai(
+        path = "/traders/:trader_id/persona",
+        method = "put",
+        tag = "ApiTags::Trader"
+    )]
+    async fn update_trader_persona(
+        &self,
+        trader_id: Path<String>,
+        request: Json<TraderPersonaUpdateRequest>,
+    ) -> TraderPersonaApiResponse {
+        match channels::update_trader_persona(&self.database, &trader_id.0, request.0).await {
+            Ok(persona) => TraderPersonaApiResponse::Ok(Json(persona)),
+            Err(err) => match err.kind {
+                channels::ChannelErrorKind::NotFound => {
+                    TraderPersonaApiResponse::NotFound(error_message(err.message))
+                }
+                _ => TraderPersonaApiResponse::InternalError(error_message(err.message)),
+            },
+        }
+    }
+
+    #[oai(
+        path = "/traders/:trader_id/chat",
+        method = "post",
+        tag = "ApiTags::Trader"
+    )]
+    async fn trader_chat(
+        &self,
+        trader_id: Path<String>,
+        request: Json<TraderChatRequest>,
+    ) -> TraderChatApiResponse {
+        match trader_chat::chat(&self.database, &trader_id.0, request.0).await {
+            Ok(response) => TraderChatApiResponse::Ok(Json(response)),
+            Err(err) => match err.kind {
+                trader_chat::TraderChatErrorKind::BadRequest => {
+                    TraderChatApiResponse::BadRequest(error_message(err.message))
+                }
+                trader_chat::TraderChatErrorKind::NotFound => {
+                    TraderChatApiResponse::NotFound(error_message(err.message))
+                }
+                trader_chat::TraderChatErrorKind::Conflict => {
+                    TraderChatApiResponse::Conflict(error_message(err.message))
+                }
+                trader_chat::TraderChatErrorKind::Internal => {
+                    TraderChatApiResponse::InternalError(error_message(err.message))
+                }
+            },
+        }
+    }
+
     #[oai(path = "/traders/:trader_id", method = "put", tag = "ApiTags::Trader")]
     async fn update_trader(
         &self,
@@ -943,6 +1251,139 @@ impl Api {
     }
 
     #[oai(
+        path = "/traders/:trader_id/proposals",
+        method = "get",
+        tag = "ApiTags::Trader"
+    )]
+    async fn get_trader_portfolio_proposals(
+        &self,
+        trader_id: Path<String>,
+    ) -> TraderPortfolioProposalsApiResponse {
+        match traders::list_portfolio_proposals(&self.database, &trader_id.0).await {
+            Ok(response) => TraderPortfolioProposalsApiResponse::Ok(Json(response)),
+            Err(err) => map_trader_portfolio_proposals_error(err),
+        }
+    }
+
+    #[oai(
+        path = "/traders/:trader_id/proposals/latest",
+        method = "get",
+        tag = "ApiTags::Trader"
+    )]
+    async fn get_latest_trader_portfolio_proposal(
+        &self,
+        trader_id: Path<String>,
+    ) -> TraderPortfolioProposalApiResponse {
+        match traders::latest_portfolio_proposal(&self.database, &trader_id.0).await {
+            Ok(proposal) => TraderPortfolioProposalApiResponse::Ok(Json(proposal)),
+            Err(err) => map_trader_portfolio_proposal_error(err),
+        }
+    }
+
+    #[oai(
+        path = "/traders/:trader_id/proposals/active",
+        method = "get",
+        tag = "ApiTags::Trader"
+    )]
+    async fn get_active_trader_portfolio_proposal(
+        &self,
+        trader_id: Path<String>,
+    ) -> TraderPortfolioProposalApiResponse {
+        match traders::active_portfolio_proposal(&self.database, &trader_id.0).await {
+            Ok(proposal) => TraderPortfolioProposalApiResponse::Ok(Json(proposal)),
+            Err(err) => map_trader_portfolio_proposal_error(err),
+        }
+    }
+
+    #[oai(
+        path = "/traders/:trader_id/proposals/:proposal_id",
+        method = "get",
+        tag = "ApiTags::Trader"
+    )]
+    async fn get_trader_portfolio_proposal(
+        &self,
+        trader_id: Path<String>,
+        proposal_id: Path<String>,
+    ) -> TraderPortfolioProposalApiResponse {
+        match traders::get_portfolio_proposal(&self.database, &trader_id.0, &proposal_id.0).await {
+            Ok(proposal) => TraderPortfolioProposalApiResponse::Ok(Json(proposal)),
+            Err(err) => map_trader_portfolio_proposal_error(err),
+        }
+    }
+
+    #[oai(
+        path = "/traders/:trader_id/proposals/:proposal_id/review",
+        method = "post",
+        tag = "ApiTags::Trader"
+    )]
+    async fn review_trader_portfolio_proposal(
+        &self,
+        trader_id: Path<String>,
+        proposal_id: Path<String>,
+        request: Json<ReviewTraderPortfolioProposalRequest>,
+    ) -> TraderPortfolioProposalApiResponse {
+        match traders::review_portfolio_proposal(
+            &self.database,
+            &trader_id.0,
+            &proposal_id.0,
+            request.0,
+        )
+        .await
+        {
+            Ok(proposal) => TraderPortfolioProposalApiResponse::Ok(Json(proposal)),
+            Err(err) => map_trader_portfolio_proposal_error(err),
+        }
+    }
+
+    #[oai(
+        path = "/traders/:trader_id/proposals/:proposal_id/accept",
+        method = "post",
+        tag = "ApiTags::Trader"
+    )]
+    async fn accept_trader_portfolio_proposal(
+        &self,
+        trader_id: Path<String>,
+        proposal_id: Path<String>,
+        request: Json<ReviewTraderPortfolioProposalRequest>,
+    ) -> TraderPortfolioProposalApiResponse {
+        match traders::accept_portfolio_proposal(
+            &self.database,
+            &trader_id.0,
+            &proposal_id.0,
+            request.0.review_note,
+        )
+        .await
+        {
+            Ok(proposal) => TraderPortfolioProposalApiResponse::Ok(Json(proposal)),
+            Err(err) => map_trader_portfolio_proposal_error(err),
+        }
+    }
+
+    #[oai(
+        path = "/traders/:trader_id/proposals/:proposal_id/reject",
+        method = "post",
+        tag = "ApiTags::Trader"
+    )]
+    async fn reject_trader_portfolio_proposal(
+        &self,
+        trader_id: Path<String>,
+        proposal_id: Path<String>,
+        request: Json<ReviewTraderPortfolioProposalRequest>,
+    ) -> TraderPortfolioProposalApiResponse {
+        match traders::reject_portfolio_proposal(
+            &self.database,
+            &trader_id.0,
+            &proposal_id.0,
+            request.0.review_note,
+        )
+        .await
+        {
+            Ok(proposal) => TraderPortfolioProposalApiResponse::Ok(Json(proposal)),
+            Err(err) => map_trader_portfolio_proposal_error(err),
+        }
+    }
+
+    #[oai(
         path = "/traders/:trader_id/trade-proposals/:proposal_id/approve",
         method = "post",
         tag = "ApiTags::Trader"
@@ -978,6 +1419,168 @@ impl Api {
         match traders::reject_trade_proposal(&self.database, &trader_id.0, &proposal_id.0).await {
             Ok(proposal) => TraderTradeProposalMutationResponse::Ok(Json(proposal)),
             Err(err) => map_trader_proposal_error(err),
+        }
+    }
+
+    #[oai(
+        path = "/traders/:trader_id/symbols",
+        method = "get",
+        tag = "ApiTags::Trader"
+    )]
+    async fn list_trader_symbols(
+        &self,
+        trader_id: Path<String>,
+        status: Query<Option<String>>,
+        asset_type: Query<Option<String>>,
+        source: Query<Option<String>>,
+    ) -> TraderSymbolsApiResponse {
+        match traders::list_symbols(
+            &self.database,
+            &trader_id.0,
+            status.0.as_deref(),
+            asset_type.0.as_deref(),
+            source.0.as_deref(),
+        )
+        .await
+        {
+            Ok(response) => TraderSymbolsApiResponse::Ok(Json(response)),
+            Err(err) => map_trader_symbols_error(err),
+        }
+    }
+
+    #[oai(
+        path = "/traders/:trader_id/symbols",
+        method = "post",
+        tag = "ApiTags::Trader"
+    )]
+    async fn create_trader_symbol(
+        &self,
+        trader_id: Path<String>,
+        request: Json<CreateTraderSymbolRequest>,
+    ) -> TraderSymbolMutationResponse {
+        match traders::create_symbol(&self.database, &trader_id.0, request.0).await {
+            Ok(symbol) => TraderSymbolMutationResponse::Created(Json(symbol)),
+            Err(err) => map_trader_symbol_mutation_error(err),
+        }
+    }
+
+    #[oai(
+        path = "/traders/:trader_id/symbols/:symbol_id",
+        method = "put",
+        tag = "ApiTags::Trader"
+    )]
+    async fn update_trader_symbol(
+        &self,
+        trader_id: Path<String>,
+        symbol_id: Path<String>,
+        request: Json<UpdateTraderSymbolRequest>,
+    ) -> TraderSymbolMutationResponse {
+        match traders::update_symbol(&self.database, &trader_id.0, &symbol_id.0, request.0).await {
+            Ok(symbol) => TraderSymbolMutationResponse::Ok(Json(symbol)),
+            Err(err) => map_trader_symbol_mutation_error(err),
+        }
+    }
+
+    #[oai(
+        path = "/traders/:trader_id/symbols/:symbol_id",
+        method = "delete",
+        tag = "ApiTags::Trader"
+    )]
+    async fn delete_trader_symbol(
+        &self,
+        trader_id: Path<String>,
+        symbol_id: Path<String>,
+    ) -> TraderSymbolMutationResponse {
+        match traders::set_symbol_status(&self.database, &trader_id.0, &symbol_id.0, "archived")
+            .await
+        {
+            Ok(symbol) => TraderSymbolMutationResponse::Ok(Json(symbol)),
+            Err(err) => map_trader_symbol_mutation_error(err),
+        }
+    }
+
+    #[oai(
+        path = "/traders/:trader_id/symbols/bulk",
+        method = "post",
+        tag = "ApiTags::Trader"
+    )]
+    async fn bulk_upsert_trader_symbols(
+        &self,
+        trader_id: Path<String>,
+        request: Json<BulkUpsertTraderSymbolsRequest>,
+    ) -> TraderSymbolsApiResponse {
+        match traders::bulk_upsert_symbols(&self.database, &trader_id.0, request.0).await {
+            Ok(response) => TraderSymbolsApiResponse::Ok(Json(response)),
+            Err(err) => map_trader_symbols_error(err),
+        }
+    }
+
+    #[oai(
+        path = "/traders/:trader_id/symbols/suggest",
+        method = "post",
+        tag = "ApiTags::Trader"
+    )]
+    async fn suggest_trader_symbols(
+        &self,
+        trader_id: Path<String>,
+        request: Json<SuggestTraderSymbolsRequest>,
+    ) -> SuggestTraderSymbolsApiResponse {
+        match traders::suggest_symbols(&self.database, &trader_id.0, request.0).await {
+            Ok(response) => SuggestTraderSymbolsApiResponse::Ok(Json(response)),
+            Err(err) => map_suggest_trader_symbols_error(err),
+        }
+    }
+
+    #[oai(
+        path = "/traders/:trader_id/symbols/:symbol_id/archive",
+        method = "post",
+        tag = "ApiTags::Trader"
+    )]
+    async fn archive_trader_symbol(
+        &self,
+        trader_id: Path<String>,
+        symbol_id: Path<String>,
+    ) -> TraderSymbolMutationResponse {
+        match traders::set_symbol_status(&self.database, &trader_id.0, &symbol_id.0, "archived")
+            .await
+        {
+            Ok(symbol) => TraderSymbolMutationResponse::Ok(Json(symbol)),
+            Err(err) => map_trader_symbol_mutation_error(err),
+        }
+    }
+
+    #[oai(
+        path = "/traders/:trader_id/symbols/:symbol_id/activate",
+        method = "post",
+        tag = "ApiTags::Trader"
+    )]
+    async fn activate_trader_symbol(
+        &self,
+        trader_id: Path<String>,
+        symbol_id: Path<String>,
+    ) -> TraderSymbolMutationResponse {
+        match traders::set_symbol_status(&self.database, &trader_id.0, &symbol_id.0, "active").await
+        {
+            Ok(symbol) => TraderSymbolMutationResponse::Ok(Json(symbol)),
+            Err(err) => map_trader_symbol_mutation_error(err),
+        }
+    }
+
+    #[oai(
+        path = "/traders/:trader_id/symbols/:symbol_id/reject",
+        method = "post",
+        tag = "ApiTags::Trader"
+    )]
+    async fn reject_trader_symbol(
+        &self,
+        trader_id: Path<String>,
+        symbol_id: Path<String>,
+    ) -> TraderSymbolMutationResponse {
+        match traders::set_symbol_status(&self.database, &trader_id.0, &symbol_id.0, "rejected")
+            .await
+        {
+            Ok(symbol) => TraderSymbolMutationResponse::Ok(Json(symbol)),
+            Err(err) => map_trader_symbol_mutation_error(err),
         }
     }
 
@@ -1095,6 +1698,65 @@ impl Api {
                 }
                 _ => DeleteDataSourceResponse::InternalError(error_message(err.message)),
             },
+        }
+    }
+
+    #[oai(
+        path = "/data-sources/:source_id/script",
+        method = "get",
+        tag = "ApiTags::DataSource"
+    )]
+    async fn get_data_source_script(&self, source_id: Path<String>) -> GetDataSourceScriptResponse {
+        match data_sources::get_script(&self.database, &source_id.0).await {
+            Ok(script) => GetDataSourceScriptResponse::Ok(Json(script)),
+            Err(err) => map_data_source_script_error(err),
+        }
+    }
+
+    #[oai(
+        path = "/data-sources/:source_id/script",
+        method = "put",
+        tag = "ApiTags::DataSource"
+    )]
+    async fn update_data_source_script(
+        &self,
+        source_id: Path<String>,
+        request: Json<UpdateDataSourceScriptRequest>,
+    ) -> UpdateDataSourceScriptResponse {
+        match data_sources::update_script(&self.database, &source_id.0, request.0).await {
+            Ok(script) => UpdateDataSourceScriptResponse::Ok(Json(script)),
+            Err(err) => map_update_data_source_script_error(err),
+        }
+    }
+
+    #[oai(
+        path = "/data-sources/:source_id/script/build",
+        method = "post",
+        tag = "ApiTags::DataSource"
+    )]
+    async fn build_data_source_script(
+        &self,
+        source_id: Path<String>,
+        request: Json<BuildDataSourceScriptRequest>,
+    ) -> BuildDataSourceScriptApiResponse {
+        match data_sources::build_script(&self.database, &source_id.0, request.0).await {
+            Ok(response) => BuildDataSourceScriptApiResponse::Ok(Json(response)),
+            Err(err) => map_build_data_source_script_error(err),
+        }
+    }
+
+    #[oai(
+        path = "/engine/data-sources/:source_id/script",
+        method = "get",
+        tag = "ApiTags::Engine"
+    )]
+    async fn get_engine_data_source_script(
+        &self,
+        source_id: Path<String>,
+    ) -> GetDataSourceScriptResponse {
+        match data_sources::engine_script(&self.database, &source_id.0).await {
+            Ok(script) => GetDataSourceScriptResponse::Ok(Json(script)),
+            Err(err) => map_data_source_script_error(err),
         }
     }
 
@@ -1398,6 +2060,20 @@ fn map_trader_mutation(
     }
 }
 
+fn map_channel_message_error(err: channels::ChannelApiError) -> CreateChannelMessageResponse {
+    match err.kind {
+        channels::ChannelErrorKind::BadRequest => {
+            CreateChannelMessageResponse::BadRequest(error_message(err.message))
+        }
+        channels::ChannelErrorKind::NotFound => {
+            CreateChannelMessageResponse::NotFound(error_message(err.message))
+        }
+        channels::ChannelErrorKind::Internal => {
+            CreateChannelMessageResponse::InternalError(error_message(err.message))
+        }
+    }
+}
+
 fn map_trader_proposal_error(err: traders::TraderApiError) -> TraderTradeProposalMutationResponse {
     match err.kind {
         traders::TraderErrorKind::BadRequest => {
@@ -1415,6 +2091,90 @@ fn map_trader_proposal_error(err: traders::TraderApiError) -> TraderTradeProposa
     }
 }
 
+fn map_trader_portfolio_proposals_error(
+    err: traders::TraderApiError,
+) -> TraderPortfolioProposalsApiResponse {
+    match err.kind {
+        traders::TraderErrorKind::NotFound => {
+            TraderPortfolioProposalsApiResponse::NotFound(error_message(err.message))
+        }
+        traders::TraderErrorKind::BadRequest
+        | traders::TraderErrorKind::Conflict
+        | traders::TraderErrorKind::Internal => {
+            TraderPortfolioProposalsApiResponse::InternalError(error_message(err.message))
+        }
+    }
+}
+
+fn map_trader_portfolio_proposal_error(
+    err: traders::TraderApiError,
+) -> TraderPortfolioProposalApiResponse {
+    match err.kind {
+        traders::TraderErrorKind::BadRequest => {
+            TraderPortfolioProposalApiResponse::BadRequest(error_message(err.message))
+        }
+        traders::TraderErrorKind::NotFound => {
+            TraderPortfolioProposalApiResponse::NotFound(error_message(err.message))
+        }
+        traders::TraderErrorKind::Conflict => {
+            TraderPortfolioProposalApiResponse::Conflict(error_message(err.message))
+        }
+        traders::TraderErrorKind::Internal => {
+            TraderPortfolioProposalApiResponse::InternalError(error_message(err.message))
+        }
+    }
+}
+
+fn map_trader_symbols_error(err: traders::TraderApiError) -> TraderSymbolsApiResponse {
+    match err.kind {
+        traders::TraderErrorKind::BadRequest => {
+            TraderSymbolsApiResponse::BadRequest(error_message(err.message))
+        }
+        traders::TraderErrorKind::NotFound => {
+            TraderSymbolsApiResponse::NotFound(error_message(err.message))
+        }
+        traders::TraderErrorKind::Conflict | traders::TraderErrorKind::Internal => {
+            TraderSymbolsApiResponse::InternalError(error_message(err.message))
+        }
+    }
+}
+
+fn map_trader_symbol_mutation_error(err: traders::TraderApiError) -> TraderSymbolMutationResponse {
+    match err.kind {
+        traders::TraderErrorKind::BadRequest => {
+            TraderSymbolMutationResponse::BadRequest(error_message(err.message))
+        }
+        traders::TraderErrorKind::NotFound => {
+            TraderSymbolMutationResponse::NotFound(error_message(err.message))
+        }
+        traders::TraderErrorKind::Conflict => {
+            TraderSymbolMutationResponse::Conflict(error_message(err.message))
+        }
+        traders::TraderErrorKind::Internal => {
+            TraderSymbolMutationResponse::InternalError(error_message(err.message))
+        }
+    }
+}
+
+fn map_suggest_trader_symbols_error(
+    err: traders::TraderApiError,
+) -> SuggestTraderSymbolsApiResponse {
+    match err.kind {
+        traders::TraderErrorKind::BadRequest => {
+            SuggestTraderSymbolsApiResponse::BadRequest(error_message(err.message))
+        }
+        traders::TraderErrorKind::NotFound => {
+            SuggestTraderSymbolsApiResponse::NotFound(error_message(err.message))
+        }
+        traders::TraderErrorKind::Conflict => {
+            SuggestTraderSymbolsApiResponse::Conflict(error_message(err.message))
+        }
+        traders::TraderErrorKind::Internal => {
+            SuggestTraderSymbolsApiResponse::InternalError(error_message(err.message))
+        }
+    }
+}
+
 fn map_data_source_trader_error(
     err: data_sources::DataSourceApiError,
 ) -> TraderDataSourcesApiResponse {
@@ -1427,6 +2187,54 @@ fn map_data_source_trader_error(
         }
         data_sources::DataSourceErrorKind::Internal => {
             TraderDataSourcesApiResponse::InternalError(error_message(err.message))
+        }
+    }
+}
+
+fn map_data_source_script_error(
+    err: data_sources::DataSourceApiError,
+) -> GetDataSourceScriptResponse {
+    match err.kind {
+        data_sources::DataSourceErrorKind::BadRequest => {
+            GetDataSourceScriptResponse::BadRequest(error_message(err.message))
+        }
+        data_sources::DataSourceErrorKind::NotFound => {
+            GetDataSourceScriptResponse::NotFound(error_message(err.message))
+        }
+        data_sources::DataSourceErrorKind::Internal => {
+            GetDataSourceScriptResponse::InternalError(error_message(err.message))
+        }
+    }
+}
+
+fn map_update_data_source_script_error(
+    err: data_sources::DataSourceApiError,
+) -> UpdateDataSourceScriptResponse {
+    match err.kind {
+        data_sources::DataSourceErrorKind::BadRequest => {
+            UpdateDataSourceScriptResponse::BadRequest(error_message(err.message))
+        }
+        data_sources::DataSourceErrorKind::NotFound => {
+            UpdateDataSourceScriptResponse::NotFound(error_message(err.message))
+        }
+        data_sources::DataSourceErrorKind::Internal => {
+            UpdateDataSourceScriptResponse::InternalError(error_message(err.message))
+        }
+    }
+}
+
+fn map_build_data_source_script_error(
+    err: data_sources::DataSourceApiError,
+) -> BuildDataSourceScriptApiResponse {
+    match err.kind {
+        data_sources::DataSourceErrorKind::BadRequest => {
+            BuildDataSourceScriptApiResponse::BadRequest(error_message(err.message))
+        }
+        data_sources::DataSourceErrorKind::NotFound => {
+            BuildDataSourceScriptApiResponse::NotFound(error_message(err.message))
+        }
+        data_sources::DataSourceErrorKind::Internal => {
+            BuildDataSourceScriptApiResponse::InternalError(error_message(err.message))
         }
     }
 }
